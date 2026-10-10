@@ -1,0 +1,18 @@
+# 从快照恢复 PVC
+# kubectl apply -f pvc-restore.yaml -n hermes-agent-alice
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agent-data-restored
+  namespace: hermes-agent-alice
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: encrypted-ssd
+  resources:
+    requests:
+      storage: 20Gi
+  dataSource:
+    name: agent-data-snapshot         # 从快照恢复
+    kind: VolumeSnapshot
+    apiGroup: snapshot.storage.k8s.io

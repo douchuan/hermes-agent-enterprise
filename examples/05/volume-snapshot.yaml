@@ -1,0 +1,11 @@
+# 为 Alice 的 PVC 创建快照（在她的 Namespace 中执行）
+# kubectl apply -f volume-snapshot.yaml -n hermes-agent-alice
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata:
+  name: agent-data-snapshot
+  namespace: hermes-agent-alice
+spec:
+  volumeSnapshotClassName: ebs-snapshot-class
+  source:
+    persistentVolumeClaimName: agent-data

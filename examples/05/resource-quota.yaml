@@ -1,13 +1,13 @@
-# ResourceQuota —— 限制单个员工 Sandbox 的总资源消耗
+# ResourceQuota —— 限制单个员工 Namespace 的总资源消耗
 #
-# 防止单个员工创建大量 Pod 或消耗过多集群资源。
-# 这些值需要根据实际集群容量和员工数量调整。
+# 部署方式：
+#   kubectl apply -f resource-quota.yaml -n hermes-agent-alice
 
 apiVersion: v1
 kind: ResourceQuota
 metadata:
-  name: agent-alice-quota
-  namespace: hermes-agents
+  name: agent-quota
+  namespace: hermes-agent-alice
 spec:
   hard:
     requests.cpu: "2"
@@ -15,4 +15,4 @@ spec:
     limits.cpu: "4"
     limits.memory: 8Gi
     pods: "1"
-    persistentvolumeclaims: "3"
+    persistentvolumeclaims: "1"

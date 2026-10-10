@@ -1,33 +1,41 @@
-# PersistentVolumeClaim —— 每员工独立的持久化存储
+# 每员工 Namespace 中的加密 PersistentVolume 配置
 #
-# workspace：Agent 的工作目录，存放临时文件、操作产物等
-# memory：Agent 的长期记忆，需要定期备份
+# 部署方式：
+#   kubectl apply -f pvc.yaml -n hermes-agent-alice
 #
-# accessModes: ReadWriteOnce —— 同一时刻只有一个 Pod 可以挂载
-# 这防止了多个 Sandbox 意外共享存储。
+# 或者与应用一起部署：
+#   kubectl apply -f agent-sandbox.yaml  (Namespace + Pod)
+#   kubectl apply -f pvc.yaml -n hermes-agent-alice
 
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: workspace-alice
-  namespace: hermes-agents
-spec:
-  accessModes:
-    - ReadWriteOnce
-  storageClassName: standard
-  resources:
-    requests:
-      storage: 10Gi
 ---
+# 加密 StorageClass（以 AWS EBS 为例）
+# 实际生产中使用云提供商或本地 CSI 驱动
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: encrypted-ssd
+provisioner: ebs.csi.aws.com  # 替换为实际 CSI
+parameters:
+  encrypted: "true"
+  kmsKeyId: "alias/hermes-agent-key"  # 使用独立的 KMS key
+  fsType: ext4
+  type: gp3
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Delete
+---
+# 每个员工 Namespace 中只有一个 PVC
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: memory-alice
-  namespace: hermes-agents
+  name: agent-data
+  namespace: hermes-agent-alice
+  labels:
+    app: hermes-agent
+    employee: alice
 spec:
   accessModes:
-    - ReadWriteOnce
-  storageClassName: standard
+    - ReadWriteOnce  # 只能被一个 Pod 挂载
+  storageClassName: encrypted-ssd
   resources:
     requests:
-      storage: 5Gi
+      storage: 20Gi

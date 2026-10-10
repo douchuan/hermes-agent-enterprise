@@ -51,45 +51,46 @@
 
 ## 架构与工作机制
 
+### 核心原则：One Person, One Namespace, One Pod, One Encrypted Volume
+
+本书采用确定性的隔离策略：**每位员工拥有独立的 Namespace、独立的 Pod、独立的加密持久化存储。** 不做共享 Namespace 的折中。
+
+```
+hermes-agent-alice/          ← Namespace
+  pod/agent                  ← Pod（单实例）
+  pvc/agent-data             ← 加密 PersistentVolume
+  pvc/agent-memory           ← 加密 PersistentVolume
+  serviceaccount/agent       ← 最小权限身份
+  networkpolicy/default-deny ← 网络策略（第 6 章）
+
+hermes-agent-bob/            ← 完全独立的 Namespace
+  ...
+```
+
+#### 为什么不做共享 Namespace 的折中？
+
+| 维度 | 共享 Namespace + Label 隔离 | 每员工独立 Namespace |
+|------|---------------------------|---------------------|
+| RBAC | 需要复杂 LabelSelector 和精细 Role 配置 | Kubernetes RBAC 天然按 Namespace 隔离 |
+| NetworkPolicy | 需要 `podSelector` 精确匹配，配置错误导致越权 | Namespace 级别的默认拒绝，作用域清晰 |
+| 审计 | 日志中混杂所有员工，需过滤 Label | `kubectl logs -n hermes-agent-alice` 天然隔离 |
+| 误操作影响 | 一个 `kubectl delete` 可能影响所有 Sandbox | Namespace 删除只影响该员工 |
+| 管理开销 | 500 个 Pod 在一个 Namespace | 500 个 Namespace，但可通过 Controller 自动化 |
+
+**结论**：管理开销的增加可以通过自动化消除，但隔离的强度一旦做弱就很难事后补救。独立 Namespace 是纵深防御的第一层，不是可选项。
+
 ### Sandbox 的 Kubernetes 资源组成
 
 每个员工的 Sandbox 由以下 Kubernetes 资源组成：
 
 | 资源 | 作用 |
 |------|------|
-| Namespace（或带 Label 的共享 Namespace）| 隔离边界 |
-| Pod | 运行 Hermes Agent 进程 |
-| PersistentVolumeClaim (PVC) | 持久化工作目录、Memory、会话 |
-| ServiceAccount | 工作负载身份 |
-| ResourceQuota / LimitRange | 资源上限 |
+| Namespace | 物理隔离边界，所有资源归属其中 |
+| Pod | 运行 Hermes Agent 进程（单实例） |
+| PersistentVolumeClaim (加密) | 持久化工作目录、Memory、会话 |
+| ServiceAccount | 最小权限的工作负载身份 |
+| ResourceQuota | 该 Namespace 的资源上限 |
 | NetworkPolicy | 网络出站控制（第 6 章） |
-
-有两种组织方式：
-
-**方式 A：每员工一个 Namespace**
-
-```
-hermes-agent-alice/
-hermes-agent-bob/
-hermes-agent-carol/
-```
-
-- 优点：Kubernetes RBAC 天然隔离，NetworkPolicy 作用域清晰。
-- 缺点：500 个员工 = 500 个 Namespace，增加管理开销。
-
-**方式 B：共享 Namespace，通过 Label 和 NetworkPolicy 隔离**
-
-```
-hermes-agents/  （所有 Sandbox 在这里）
-  pod/alice-agent   label: employee=alice
-  pod/bob-agent     label: employee=bob
-  pod/carol-agent   label: employee=carol
-```
-
-- 优点：管理简单，适合员工数量较多的场景。
-- 缺点：需要更精细的 NetworkPolicy 和 RBAC 配置。
-
-**建议**：员工数 < 100 时可用方式 A；员工数较多时采用方式 B，通过 Label 和策略实现逻辑隔离。下面的示例采用方式 B。
 
 ### Sandbox 配置详解
 
@@ -97,37 +98,39 @@ hermes-agents/  （所有 Sandbox 在这里）
 
 ```yaml
 # examples/05/agent-sandbox.yaml
+# 每位员工一个独立 Namespace，此处为 Alice 的完整配置
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hermes-agent-alice
+  labels:
+    app: hermes-agent
+    employee: alice
+    tenant: acme-corp
+---
 apiVersion: v1
 kind: Pod
 metadata:
-  name: agent-alice
-  namespace: hermes-agents
+  name: agent
+  namespace: hermes-agent-alice
   labels:
     app: hermes-agent
     employee: alice
     tenant: acme-corp
 spec:
-  # --- 容器运行时安全 ---
+  # --- 安全上下文 ---
 
-  # 禁止使用 hostNetwork、hostPID、hostIPC
-  hostNetwork: false
-  hostPID: false
-  hostIPC: false
-
-  # 使用非 root 用户运行进程
+  # Seccomp 限制系统调用
   securityContext:
     runAsUser: 1000
     runAsGroup: 1000
     runAsNonRoot: true
     fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
 
   # 自动挂载 ServiceAccount Token 设为 false（默认不需要访问 K8s API）
   automountServiceAccountToken: false
-
-  # --- 网络 ---
-
-  # 仅允许访问指定目标（第 6 章展开）
-  # 这里先展示原则：默认拒绝，按需开放
 
   # --- 容器定义 ---
 
@@ -227,15 +230,15 @@ spec:
   volumes:
     - name: workspace
       persistentVolumeClaim:
-        claimName: workspace-alice
+        claimName: agent-data
 
     - name: memory
       persistentVolumeClaim:
-        claimName: memory-alice
+        claimName: agent-memory
 
     - name: config
       configMap:
-        name: agent-alice-config
+        name: agent-config
 
     - name: tmp
       emptyDir:
@@ -357,46 +360,66 @@ spec:
 
 ResourceQuota 限制该员工 Sandbox 的总资源消耗（防止创建大量 Pod 消耗集群资源）。LimitRange 为容器设置默认的 request 和 limit，以及上下限。
 
-### PersistentVolumeClaim 设计
+### 持久化存储：每员工一个独立 Namespace、一个 Pod、一个加密 Volume
 
-每个 Sandbox 需要独立的持久化存储：
+每个员工的 Sandbox 在其独立 Namespace 中只挂载**一个**加密的 PersistentVolume，用于存储工作目录和 Memory：
 
 ```yaml
 # examples/05/pvc.yaml
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: workspace-alice
-  namespace: hermes-agents
-spec:
-  accessModes:
-    - ReadWriteOnce
-  storageClassName: standard
-  resources:
-    requests:
-      storage: 10Gi
+# Alice 的 Namespace 中的存储配置
+
 ---
+# 1. 使用 encrypted StorageClass（由云提供商或本地 CSI 驱动提供）
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: encrypted-ssd
+provisioner: kubernetes.io/no-provisioner  # 替换为实际 CSI，如 ebs.csi.aws.com
+parameters:
+  encrypted: "true"                        # AWS EBS 加密
+  kmsKeyId: "alias/hermes-agent-key"       # 指定 KMS 密钥
+  fsType: ext4
+volumeBindingMode: WaitForFirstConsumer
+---
+# 2. 每员工 Namespace 中只创建一个 PVC
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: memory-alice
-  namespace: hermes-agents
+  name: agent-data                         # 该 Namespace 中唯一的 Volume
+  namespace: hermes-agent-alice
 spec:
   accessModes:
-    - ReadWriteOnce
-  storageClassName: standard
+    - ReadWriteOnce                        # 只能被一个 Pod 挂载
+  storageClassName: encrypted-ssd
   resources:
     requests:
-      storage: 5Gi
+      storage: 20Gi
 ```
 
-**为什么工作目录和 Memory 分开两个 PVC？**
+**一个 Volume 而不是多个**：工作目录和 Memory 放在同一个加密 PVC 下的不同子目录中（通过 `subPath` 或 Pod 内路径区分），减少存储管理的复杂度，同时保持加密覆盖全部持久化数据。
 
-1. **备份策略不同**：Memory 需要定期备份（包含员工的知识提炼），工作目录可以按需清理。
-2. **恢复粒度**：Memory 损坏时可以单独恢复，不影响工作目录中的临时文件。
-3. **性能考虑**：如果存储后端支持按 PVC 设置性能级别，可以为 Memory 选择更低延迟的存储。
+**加密方式取决于存储后端**：
 
-**AccessModes 选择 `ReadWriteOnce`** 而非 `ReadWriteMany`，确保同一时刻只有一个 Pod 可以挂载该 PVC。这防止多个 Sandbox 意外共享存储。
+| 存储后端 | 加密方式 | 说明 |
+|----------|----------|------|
+| AWS EBS | EBS Encryption + KMS | 卷在创建时自动加密，解密在节点侧透明完成 |
+| GCP PD | GCE PD Encryption + Cloud KMS | 同上 |
+| Azure Disk | Azure Disk Encryption / SSE + CMK | 支持客户管理的密钥（CMK） |
+| Ceph RBD | LUKS + cryptsetup | 需要 CSI 驱动支持，或使用 Ceph 原生加密 |
+| Local PV | dm-crypt / LUKS | 手动加密，适合测试环境 |
+
+**每员工一个 KMS 密钥还是共享？**
+
+- **共享 KMS 密钥**（推荐起步方案）：所有员工的 Volume 使用同一个 KMS key，管理简单。如果 KMS key 泄露，所有 Volume 都受影响。
+- **每员工一个 KMS 密钥**：更强的隔离，但 KMS key 数量随员工增长。适合合规要求严格的环境。
+
+**为什么必须加密？** 第 8 章的安全边界表会提到：
+
+| 威胁 | 未加密 | 加密 |
+|------|--------|------|
+| 存储后端被入侵（如 Ceph 节点被攻破） | 数据明文可读 | 数据被加密保护 |
+| PVC 备份文件泄露 | Memory 内容完全暴露 | 需要 KMS key 才能解密 |
+| 磁盘退役后数据残留 | 物理介质可能被恢复 | 密钥销毁即不可读 |
 
 ## 实现步骤
 
@@ -442,49 +465,49 @@ interface SandboxConfig {
   employeeId: string;
   tenantId: string;
   image: string;
-  workspaceStorage: string; // e.g., "10Gi"
-  memoryStorage: string;    // e.g., "5Gi"
-  cpuLimit: string;         // e.g., "2"
-  memoryLimit: string;      // e.g., "4Gi"
+  storage: string;         // e.g., "20Gi"
+  storageClass: string;    // e.g., "encrypted-ssd"
+  cpuLimit: string;        // e.g., "2"
+  memoryLimit: string;     // e.g., "4Gi"
 }
 
 const kc = new k8s.KubeConfig();
 kc.loadFromDefault();
 const coreV1 = kc.makeApiClient(k8s.CoreV1Api);
+const appsV1 = kc.makeApiClient(k8s.AppsV1Api);
 
-const NAMESPACE = "hermes-agents";
 const AGENT_IMAGE = "ghcr.io/example-org/hermes-agent:v1.2.3";
 
 async function createSandbox(config: SandboxConfig): Promise<void> {
   const { employeeId, tenantId } = config;
+  const ns = `hermes-agent-${employeeId}`;
 
-  // 1. 检查是否已有 Sandbox
+  // 1. 创建 Namespace（如果不存在）
+  await createNamespace(ns, employeeId, tenantId);
+
+  // 2. 检查是否已有 Sandbox
   try {
-    const existingPod = await coreV1.readNamespacedPod(
-      `agent-${employeeId}`,
-      NAMESPACE
-    );
-    if (existingPod) {
-      console.log(`Sandbox already exists for ${employeeId}`);
-      return;
-    }
+    await coreV1.readNamespacedPod("agent", ns);
+    console.log(`Sandbox already exists for ${employeeId}`);
+    return;
   } catch (err: any) {
     if (err.statusCode !== 404) throw err;
-    // Pod 不存在，继续创建
   }
 
-  // 2. 创建 PVC
-  await createPVC(`workspace-${employeeId}`, config.workspaceStorage);
-  await createPVC(`memory-${employeeId}`, config.memoryStorage);
+  // 3. 创建加密 PVC
+  await createEncryptedPVC(ns, config.storage, config.storageClass);
 
-  // 3. 创建 ConfigMap
-  await createConfigMap(employeeId, tenantId);
+  // 4. 创建 ConfigMap
+  await createConfigMap(ns, employeeId, tenantId);
 
-  // 4. 创建 Pod
+  // 5. 创建 ServiceAccount
+  await createServiceAccount(ns, employeeId);
+
+  // 6. 创建 Pod
   const pod: k8s.V1Pod = {
     metadata: {
-      name: `agent-${employeeId}`,
-      namespace: NAMESPACE,
+      name: "agent",
+      namespace: ns,
       labels: {
         app: "hermes-agent",
         employee: employeeId,
@@ -501,6 +524,7 @@ async function createSandbox(config: SandboxConfig): Promise<void> {
         runAsGroup: 1000,
         runAsNonRoot: true,
         fsGroup: 1000,
+        seccompProfile: { type: "RuntimeDefault" },
       },
       containers: [
         {
@@ -510,9 +534,9 @@ async function createSandbox(config: SandboxConfig): Promise<void> {
           workingDir: "/home/hermes/workspace",
           command: ["/usr/bin/hermes-agent"],
           args: [
-            `--config=/etc/hermes/config.yaml`,
-            `--workspace=/home/hermes/workspace`,
-            `--memory=/home/hermes/memory`,
+            "--config=/etc/hermes/config.yaml",
+            "--workspace=/home/hermes/workspace",
+            "--memory=/home/hermes/memory",
           ],
           securityContext: {
             allowPrivilegeEscalation: false,
@@ -535,8 +559,7 @@ async function createSandbox(config: SandboxConfig): Promise<void> {
             periodSeconds: 15,
           },
           volumeMounts: [
-            { name: "workspace", mountPath: "/home/hermes/workspace" },
-            { name: "memory", mountPath: "/home/hermes/memory" },
+            { name: "data", mountPath: "/home/hermes" },
             { name: "config", mountPath: "/etc/hermes", readOnly: true },
             { name: "tmp", mountPath: "/tmp" },
           ],
@@ -548,16 +571,12 @@ async function createSandbox(config: SandboxConfig): Promise<void> {
       ],
       volumes: [
         {
-          name: "workspace",
-          persistentVolumeClaim: { claimName: `workspace-${employeeId}` },
-        },
-        {
-          name: "memory",
-          persistentVolumeClaim: { claimName: `memory-${employeeId}` },
+          name: "data",
+          persistentVolumeClaim: { claimName: "agent-data" },
         },
         {
           name: "config",
-          configMap: { name: `agent-${employeeId}-config` },
+          configMap: { name: "agent-config" },
         },
         {
           name: "tmp",
@@ -567,35 +586,60 @@ async function createSandbox(config: SandboxConfig): Promise<void> {
     },
   };
 
-  await coreV1.createNamespacedPod(NAMESPACE, pod);
-  console.log(`Created sandbox for ${employeeId}`);
+  await coreV1.createNamespacedPod(ns, pod);
+  console.log(`Created sandbox for ${employeeId} in namespace ${ns}`);
 
-  // 5. 等待 Pod Ready
-  await waitForPodReady(`agent-${employeeId}`);
+  // 7. 应用 NetworkPolicy（第 6 章）
+  // await applyNetworkPolicy(ns);
+
+  // 8. 等待 Pod Ready
+  await waitForPodReady("agent", ns);
 }
 
-async function createPVC(name: string, storage: string): Promise<void> {
+async function createNamespace(ns: string, employeeId: string, tenantId: string): Promise<void> {
+  try {
+    await coreV1.readNamespace(ns);
+    return; // 已存在
+  } catch (err: any) {
+    if (err.statusCode !== 404) throw err;
+  }
+
+  const namespaceObj: k8s.V1Namespace = {
+    metadata: {
+      name: ns,
+      labels: {
+        app: "hermes-agent",
+        employee: employeeId,
+        tenant: tenantId,
+      },
+    },
+  };
+  await coreV1.createNamespace(namespaceObj);
+}
+
+async function createEncryptedPVC(ns: string, storage: string, storageClass: string): Promise<void> {
   const pvc: k8s.V1PersistentVolumeClaim = {
-    metadata: { name, namespace: NAMESPACE },
+    metadata: { name: "agent-data", namespace: ns },
     spec: {
       accessModes: ["ReadWriteOnce"],
-      storageClassName: "standard",
+      storageClassName: storageClass,
       resources: { requests: { storage } },
     },
   };
   try {
-    await coreV1.createNamespacedPersistentVolumeClaim(NAMESPACE, pvc);
+    await coreV1.createNamespacedPersistentVolumeClaim(ns, pvc);
   } catch (err: any) {
     if (err.statusCode !== 409) throw err; // AlreadyExists
   }
 }
 
 async function createConfigMap(
+  ns: string,
   employeeId: string,
   tenantId: string
 ): Promise<void> {
   const cm: k8s.V1ConfigMap = {
-    metadata: { name: `agent-${employeeId}-config`, namespace: NAMESPACE },
+    metadata: { name: "agent-config", namespace: ns },
     data: {
       "config.yaml": `
 employee_id: "${employeeId}"
@@ -607,17 +651,29 @@ workspace_path: "/home/hermes/workspace"
     },
   };
   try {
-    await coreV1.createNamespacedConfigMap(NAMESPACE, cm);
+    await coreV1.createNamespacedConfigMap(ns, cm);
   } catch (err: any) {
     if (err.statusCode !== 409) throw err;
   }
 }
 
-async function waitForPodReady(name: string, timeoutMs = 120000): Promise<void> {
+async function createServiceAccount(ns: string, _employeeId: string): Promise<void> {
+  const sa: k8s.V1ServiceAccount = {
+    metadata: { name: "agent", namespace: ns },
+    automountServiceAccountToken: false,
+  };
+  try {
+    await coreV1.createNamespacedServiceAccount(ns, sa);
+  } catch (err: any) {
+    if (err.statusCode !== 409) throw err;
+  }
+}
+
+async function waitForPodReady(name: string, ns: string, timeoutMs = 120000): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     try {
-      const pod = await coreV1.readNamespacedPod(name, NAMESPACE);
+      const pod = await coreV1.readNamespacedPod(name, ns);
       const ready = pod.status?.conditions?.some(
         (c) => c.type === "Ready" && c.status === "True"
       );
@@ -627,7 +683,7 @@ async function waitForPodReady(name: string, timeoutMs = 120000): Promise<void> 
     }
     await new Promise((r) => setTimeout(r, 2000));
   }
-  throw new Error(`Pod ${name} did not become ready within ${timeoutMs}ms`);
+  throw new Error(`Pod ${name} in ${ns} did not become ready within ${timeoutMs}ms`);
 }
 ```
 
@@ -648,11 +704,12 @@ async function waitForPodReady(name: string, timeoutMs = 120000): Promise<void> 
 
 ```yaml
 # examples/05/agent-deployment.yaml
+# 部署到 Alice 的 Namespace: kubectl apply -f agent-deployment.yaml -n hermes-agent-alice
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: agent-alice
-  namespace: hermes-agents
+  name: agent
+  namespace: hermes-agent-alice
   labels:
     app: hermes-agent
     employee: alice
@@ -808,12 +865,12 @@ metadata:
   name: gvisor
 handler: runsc
 ---
-# Pod 使用 gVisor
+# Pod 使用 gVisor（在员工的 Namespace 中）
 apiVersion: v1
 kind: Pod
 metadata:
-  name: agent-alice
-  namespace: hermes-agents
+  name: agent
+  namespace: hermes-agent-alice
 spec:
   runtimeClassName: gvisor
   # ... 其他配置不变 ...
@@ -840,12 +897,12 @@ metadata:
   name: kata
 handler: kata
 ---
-# Pod 使用 Kata
+# Pod 使用 Kata（在员工的 Namespace 中）
 apiVersion: v1
 kind: Pod
 metadata:
-  name: agent-alice
-  namespace: hermes-agents
+  name: agent
+  namespace: hermes-agent-alice
 spec:
   runtimeClassName: kata
   # ... 其他配置不变 ...
@@ -900,46 +957,37 @@ Control Plane 在员工首次登录或管理员激活时创建 Sandbox（见 5.1
 当员工离职或被禁用时，Control Plane 执行回收流程：
 
 ```
-1. 将 Deployment replicas 设为 0（停止 Pod）
+1. 将 Pod replicas 设为 0（停止 Pod）
 2. 导出审计日志和会话记录（归档到长期存储）
-3. 备份 Memory PVC（按企业保留策略）
-4. 删除 Pod、Deployment、ServiceAccount
-5. 删除 PVC（或保留一段过渡期后删除）
-6. 删除 ConfigMap
-7. 更新元数据：标记员工为"已回收"
+3. 销毁加密 Volume 的 KMS key 或标记 Volume 待删除
+4. 删除整个 Namespace（级联删除其中所有资源）
+5. 等待 PVC 终止（可选：保留一段过渡期后删除）
+6. 更新元数据：标记员工为"已回收"
 ```
 
 ```typescript
 // examples/05/sandbox-recycle.ts
 async function recycleSandbox(employeeId: string): Promise<void> {
+  const ns = `hermes-agent-${employeeId}`;
+
   // 1. 停止 Pod
-  await coreV1.patchNamespacedDeploymentScale(
-    `agent-${employeeId}`,
-    NAMESPACE,
+  await appsV1.patchNamespacedDeploymentScale(
+    "agent",
+    ns,
     { spec: { replicas: 0 } } as k8s.V1Deployment
   );
 
   // 2. 导出审计日志（伪代码）
   await exportAuditLogs(employeeId);
 
-  // 3. 备份 Memory PVC
-  await backupPVC(`memory-${employeeId}`);
+  // 3. 销毁 KMS key 或标记 Volume 待删除
+  await destroyEncryptionKey(employeeId);
 
-  // 4. 删除资源
-  await coreV1.deleteNamespacedDeployment(`agent-${employeeId}`, NAMESPACE);
-  await coreV1.deleteNamespacedServiceAccount(`agent-${employeeId}`, NAMESPACE);
-  await coreV1.deleteNamespacedPersistentVolumeClaim(
-    `workspace-${employeeId}`,
-    NAMESPACE
-  );
-  await coreV1.deleteNamespacedPersistentVolumeClaim(
-    `memory-${employeeId}`,
-    NAMESPACE
-  );
-  await coreV1.deleteNamespacedConfigMap(
-    `agent-${employeeId}-config`,
-    NAMESPACE
-  );
+  // 4. 删除整个 Namespace（级联删除其中所有资源）
+  await coreV1.deleteNamespace(ns);
+
+  // 5. 更新元数据：标记员工为"已回收"
+  await markEmployeeRecycled(employeeId);
 }
 ```
 
@@ -962,48 +1010,72 @@ async function recycleSandbox(employeeId: string): Promise<void> {
 
 以下实验在 Kubernetes 测试集群中执行，验证 Sandbox 隔离的有效性。
 
-### 实验 1：存储隔离
+### 实验 1：Namespace 隔离验证
 
-**目标**：验证员工 A 的 Agent 无法读取员工 B 的文件。
+**目标**：验证员工 A 的 Namespace 中的资源对员工 B 不可见。
 
 **步骤**：
 
 ```bash
-# 1. 在 Alice 的工作目录中写入一个文件
-kubectl exec -n hermes-agents agent-alice -- \
-  sh -c 'echo "secret from alice" > /home/hermes/workspace/alice-secret.txt'
+# 1. 在 Alice 的 Namespace 中查看资源
+kubectl get all -n hermes-agent-alice
 
-# 2. 尝试在 Bob 的 Sandbox 中读取 Alice 的文件
-kubectl exec -n hermes-agents agent-bob -- \
-  sh -c 'cat /home/hermes/workspace/alice-secret.txt'
+# 2. 在 Bob 的 Namespace 中查看资源
+kubectl get all -n hermes-agent-bob
+
+# 3. 尝试从 Bob 的 Pod 访问 Alice 的 Namespace
+kubectl exec -n hermes-agent-bob agent -- \
+  sh -c 'curl -s http://agent.hermes-agent-alice.svc.cluster.local:8080/healthz'
 ```
 
-**预期结果**：第二条命令失败（文件不存在或权限不足）。Bob 的 PVC 是独立的，无法访问 Alice 的 PVC 数据。
+**预期结果**：第一条和第二条命令各自只看到自己的资源。第三条命令失败（连接被拒绝或 DNS 解析失败），因为 NetworkPolicy 禁止跨 Namespace 访问（第 6 章）。
 
-### 实验 2：进程隔离
+### 实验 2：存储隔离与加密验证
+
+**目标**：验证每个 Namespace 有独立的加密 PVC。
+
+**步骤**：
+
+```bash
+# 1. 在 Alice 的 Pod 中写入文件
+kubectl exec -n hermes-agent-alice agent -- \
+  sh -c 'echo "secret from alice" > /home/hermes/workspace/alice-secret.txt'
+
+# 2. 尝试在 Bob 的 Pod 中读取 Alice 的文件
+kubectl exec -n hermes-agent-bob agent -- \
+  sh -c 'cat /home/hermes/workspace/alice-secret.txt'
+
+# 3. 验证 PVC 加密状态（以 AWS EBS 为例）
+kubectl get pvc agent-data -n hermes-agent-alice -o jsonpath='{.spec.storageClassName}'
+# 输出应为 "encrypted-ssd" 或类似的加密 StorageClass
+```
+
+**预期结果**：第二条命令失败（文件不存在）。Bob 的 PVC 是独立的，无法访问 Alice 的数据。
+
+### 实验 3：进程隔离
 
 **目标**：验证员工 A 的 Agent 无法看到或影响员工 B 的进程。
 
 **步骤**：
 
 ```bash
-# 1. 在 Alice 的 Sandbox 中查看进程
-kubectl exec -n hermes-agents agent-alice -- ps aux
+# 1. 在 Alice 的 Namespace 中查看进程
+kubectl exec -n hermes-agent-alice agent -- ps aux
 
-# 2. 在 Bob 的 Sandbox 中查看进程
-kubectl exec -n hermes-agents agent-bob -- ps aux
+# 2. 在 Bob 的 Namespace 中查看进程
+kubectl exec -n hermes-agent-bob agent -- ps aux
 ```
 
-**预期结果**：两个 Sandbox 各自只能看到自己的进程（通常只有 hermes-agent 进程和其子进程）。看不到对方的进程。
+**预期结果**：两个 Namespace 各自只能看到自己的进程（通常只有 hermes-agent 进程和其子进程）。看不到对方的进程。
 
-### 实验 3：非 root 用户验证
+### 实验 4：非 root 用户验证
 
 **目标**：验证 Agent 进程不是以 root 运行。
 
 **步骤**：
 
 ```bash
-kubectl exec -n hermes-agents agent-alice -- id
+kubectl exec -n hermes-agent-alice agent -- id
 ```
 
 **预期结果**：
@@ -1014,7 +1086,7 @@ uid=1000 gid=1000 groups=1000
 
 而不是 `uid=0 (root)`。
 
-### 实验 4：只读根文件系统验证
+### 实验 5：只读根文件系统验证
 
 **目标**：验证无法向系统目录写入文件。
 
@@ -1022,7 +1094,7 @@ uid=1000 gid=1000 groups=1000
 
 ```bash
 # 尝试向 /usr/local/bin 写入文件
-kubectl exec -n hermes-agents agent-alice -- \
+kubectl exec -n hermes-agent-alice agent -- \
   sh -c 'echo "malicious" > /usr/local/bin/backdoor'
 ```
 
@@ -1030,20 +1102,20 @@ kubectl exec -n hermes-agents agent-alice -- \
 
 ```bash
 # 但可以向 workspace 写入
-kubectl exec -n hermes-agents agent-alice -- \
+kubectl exec -n hermes-agent-alice agent -- \
   sh -c 'echo "workspace file" > /home/hermes/workspace/test.txt && cat /home/hermes/workspace/test.txt'
 ```
 
 **预期结果**：成功写入和读取。
 
-### 实验 5：Capabilities 验证
+### 实验 6：Capabilities 验证
 
 **目标**：验证进程没有任何 capabilities。
 
 **步骤**：
 
 ```bash
-kubectl exec -n hermes-agents agent-alice -- cat /proc/1/status | grep Cap
+kubectl exec -n hermes-agent-alice agent -- cat /proc/1/status | grep Cap
 ```
 
 **预期结果**：所有 capabilities 为 0。
@@ -1058,25 +1130,44 @@ CapAmb: 0000000000000000
 
 如果任何一行不是全 0，说明还有 capabilities 未被移除。
 
-### 实验 6：ResourceQuota 验证
+### 实验 7：ResourceQuota 验证
 
 **目标**：验证无法超过资源限制。
 
 **步骤**：
 
 ```bash
-# 在 Alice 的 Sandbox 中消耗大量内存（超过 4Gi limit）
-kubectl exec -n hermes-agents agent-alice -- \
+# 在 Alice 的 Namespace 中消耗大量内存（超过 limit）
+kubectl exec -n hermes-agent-alice agent -- \
   python3 -c 'import sys; x = "A" * (5 * 1024 * 1024 * 1024)'
 ```
 
 **预期结果**：进程被 OOM Kill（返回 `Killed` 或退出码 137）。
 
 ```bash
-kubectl get pod agent-alice -n hermes-agents -o jsonpath='{.status.containerStatuses[0].lastState}'
+kubectl get pod agent -n hermes-agent-alice -o jsonpath='{.status.containerStatuses[0].lastState}'
 ```
 
 返回 `reason: OOMKilled`。
+
+### 实验 8：Namespace 级删除验证
+
+**目标**：验证删除一个 Namespace 不会影响其他员工的 Sandbox。
+
+**步骤**：
+
+```bash
+# 1. 确认 Bob 的 Sandbox 正常运行
+kubectl get pod agent -n hermes-agent-bob
+
+# 2. 删除 Alice 的整个 Namespace
+kubectl delete namespace hermes-agent-alice
+
+# 3. 验证 Bob 的 Sandbox 仍然正常运行
+kubectl get pod agent -n hermes-agent-bob
+```
+
+**预期结果**：删除 Alice 的 Namespace 后，Bob 的 Sandbox 不受任何影响。这验证了 Namespace 隔离的有效性。
 
 ## 常见问题与故障排查
 
@@ -1155,13 +1246,16 @@ kubectl exec -it agent-alice -n hermes-agents -- sh
 
 | 威胁 | 防范机制 | 有效性 |
 |------|----------|--------|
-| 员工 A 读取员工 B 的文件 | PVC 隔离 + ReadWriteOnce | 强 |
+| 员工 A 读取员工 B 的文件 | 独立 Namespace + 独立 PVC | 强 |
+| 员工 A 的 Namespace 被误删影响员工 B | Namespace 隔离 | 强 |
 | Agent 修改系统文件 | 只读根文件系统 | 强 |
 | 容器进程以 root 运行 | runAsNonRoot + UID 1000 | 强 |
 | 进程使用危险 capabilities | drop: ALL | 强 |
 | 进程通过系统调用攻击内核 | Seccomp RuntimeDefault | 中（取决于 seccomp 配置覆盖度） |
-| 单个 Agent 消耗过多资源 | ResourceQuota + LimitRange | 强 |
+| 单个 Agent 消耗过多资源 | ResourceQuota | 强 |
 | Agent 访问 Kubernetes API | automountServiceAccountToken: false | 强 |
+| 存储后端被入侵时数据泄露 | PVC 加密 | 强 |
+| PVC 备份文件泄露 | 需要 KMS key 才能解密 | 强 |
 
 ### 本章方案不能防范什么
 
@@ -1171,26 +1265,29 @@ kubectl exec -it agent-alice -n hermes-agents -- sh
 | Agent 通过网络直接连接外部系统 | NetworkPolicy + Egress Proxy（第 6 章） |
 | 内核漏洞导致容器逃逸（标准容器） | gVisor 或 Kata Containers |
 | Hermes Agent 镜像中的供应链漏洞 | 镜像签名验证、SBOM、漏洞扫描（第 12 章） |
-| Agent 的 Memory 中包含敏感信息被未授权访问 | Memory 加密、访问控制（第 8 章） |
-| 存储后端的漏洞（如 Ceph、NFS 的 RCE） | 存储层安全配置、网络隔离 |
+| KMS key 泄露导致加密 Volume 可被解密 | KMS key 轮换、访问审计、每员工独立 key |
+| 控制平面被攻破后任意 Namespace 操作 | 控制平面自身的安全加固（第 13、14 章） |
 
 ### 取舍
 
-1. **每员工一个 Sandbox vs 共享 Sandbox**：我们选择了前者，因为 Memory 隔离、故障隔离和审计粒度比资源效率更重要。
-2. **Deployment vs 直接创建 Pod**：选择了 Deployment，牺牲了少量控制粒度，换取自动重启和更新能力。
-3. **标准容器 vs gVisor vs Kata**：默认使用标准容器 + 纵深防御，因为大多数企业 Agent 执行的是可信工具调用。当 Agent 需要执行不可信 Shell 或代码时，升级到 gVisor 或 Kata。
-4. **只读根文件系统**：这增加了运维复杂度（需要预先知道所有写入路径），但大幅减少了攻击面。
+1. **每员工一个独立 Namespace**：管理开销增加，但可通过 Controller 自动化。隔离的强度一旦做弱就很难事后补救，独立 Namespace 是纵深防御的第一层。
+2. **一个加密 Volume 而非多个**：工作目录和 Memory 放在同一个加密 PVC 下，减少存储管理复杂度，加密覆盖全部持久化数据。
+3. **Deployment vs 直接创建 Pod**：选择了 Deployment，牺牲了少量控制粒度，换取自动重启和更新能力。
+4. **标准容器 vs gVisor vs Kata**：默认使用标准容器 + 纵深防御，因为大多数企业 Agent 执行的是可信工具调用。当 Agent 需要执行不可信 Shell 或代码时，升级到 gVisor 或 Kata。
+5. **只读根文件系统**：增加了运维复杂度（需要预先知道所有写入路径），但大幅减少了攻击面。
+6. **加密存储的权衡**：加密增加了少量 I/O 延迟（通常 < 5%），但防止了存储后端被入侵时的数据泄露。对于高合规要求的行业（金融、医疗、政府），加密是强制要求。
 
 ## 本章小结
 
 本章完成了为每位员工构建隔离 Agent Sandbox 的设计：
 
-1. **Sandbox 组成**：Pod/Deployment + PVC + ServiceAccount + ConfigMap + NetworkPolicy。
-2. **纵深防御**：非 root、只读根文件系统、移除所有 capabilities、Seccomp、资源限制。
-3. **最小权限身份**：`automountServiceAccountToken: false`，默认不访问 Kubernetes API。
-4. **存储隔离**：每员工独立 PVC，`ReadWriteOnce` 防止共享挂载。
-5. **生命周期管理**：创建、暂停、回收和故障恢复的完整流程。
-6. **更强隔离**：当标准容器不够时，使用 gVisor 或 Kata Containers。
+1. **核心原则**：One Person, One Namespace, One Pod, One Encrypted Volume。不做共享 Namespace 的折中。
+2. **Namespace 隔离**：Kubernetes RBAC 天然按 Namespace 隔离，NetworkPolicy 作用域清晰，删除操作影响范围可控。
+3. **纵深防御**：非 root、只读根文件系统、移除所有 capabilities、Seccomp、资源限制。
+4. **加密持久化存储**：每个员工一个独立的加密 PVC，使用云提供商或 CSI 驱动提供的加密 StorageClass。
+5. **最小权限身份**：`automountServiceAccountToken: false`，默认不访问 Kubernetes API。
+6. **生命周期管理**：创建、暂停、回收和故障恢复的完整流程。回收时通过 `kubectl delete namespace` 级联删除。
+7. **更强隔离**：当标准容器不够时，使用 gVisor 或 Kata Containers。
 
 Sandbox 解决了计算和存储隔离的问题。但 Agent 仍然可能通过网络访问未授权的目标，或向 Tool Gateway 发起恶意工具调用——这分别由第 6 章（网络策略）和第 7 章（Tool Gateway 授权）解决。
 

@@ -1,14 +1,12 @@
 # 使用 Deployment 管理的 Agent Sandbox
-# 相比直接创建 Pod，Deployment 提供自动重启和滚动更新能力
-#
-# strategy.type: Recreate —— Agent 不支持多实例同时运行
-# replicas: 1 —— 每员工一个实例
+# 部署到员工的 Namespace 中：
+#   kubectl apply -f agent-deployment.yaml -n hermes-agent-alice
 
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: agent-alice
-  namespace: hermes-agents
+  name: agent
+  namespace: hermes-agent-alice
   labels:
     app: hermes-agent
     employee: alice
@@ -20,7 +18,7 @@ spec:
       app: hermes-agent
       employee: alice
   strategy:
-    type: Recreate
+    type: Recreate  # Agent 不支持多实例同时运行
   template:
     metadata:
       labels:
@@ -31,12 +29,14 @@ spec:
       hostNetwork: false
       hostPID: false
       hostIPC: false
+      automountServiceAccountToken: false
       securityContext:
         runAsUser: 1000
         runAsGroup: 1000
         runAsNonRoot: true
         fsGroup: 1000
-      automountServiceAccountToken: false
+        seccompProfile:
+          type: RuntimeDefault
 
       containers:
         - name: hermes-agent
@@ -88,10 +88,8 @@ spec:
             failureThreshold: 3
 
           volumeMounts:
-            - name: workspace
-              mountPath: /home/hermes/workspace
-            - name: memory
-              mountPath: /home/hermes/memory
+            - name: data
+              mountPath: /home/hermes
             - name: config
               mountPath: /etc/hermes
               readOnly: true
@@ -105,15 +103,12 @@ spec:
               value: "acme-corp"
 
       volumes:
-        - name: workspace
+        - name: data
           persistentVolumeClaim:
-            claimName: workspace-alice
-        - name: memory
-          persistentVolumeClaim:
-            claimName: memory-alice
+            claimName: agent-data
         - name: config
           configMap:
-            name: agent-alice-config
+            name: agent-config
         - name: tmp
           emptyDir:
             medium: Memory

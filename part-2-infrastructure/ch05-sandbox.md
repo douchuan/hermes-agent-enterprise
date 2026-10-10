@@ -40,20 +40,22 @@
 | Agent 消耗过多资源 | 模型输出异常、工具循环 | 拒绝服务 |
 | Agent 使用高权限身份访问 Kubernetes API | 过度授权的 ServiceAccount | 集群被操控 |
 | Agent 执行任意 Shell 命令 | Hermes 的 Shell 工具、代码执行工具 | 容器内任意操作 |
+| 存储介质被未授权访问（离线磁盘、快照、备份） | 物理介质流出、未加密落盘 | 数据明文泄露 |
 
 ### 设计目标
 
 1. **存储隔离**：每个 Sandbox 的工作目录、Memory、配置和会话对其他 Sandbox 不可见。
-2. **运行时安全**：采用纵深防御（非 root、只读根文件系统、最小 capabilities、Seccomp、资源限制），降低容器逃逸和滥用的影响。
-3. **最小权限身份**：Sandbox 的 ServiceAccount 只拥有完成工作所需的最小权限，默认不授予 Kubernetes API 访问权。
-4. **可管理的生命周期**：Sandbox 能按需创建、暂停、恢复和回收，且故障时能自动恢复。
-5. **可验证的隔离**：通过正向和负向实验确认隔离有效。
+2. **落盘加密**：所有持久化存储启用透明静态加密，防止离线磁盘、快照和备份中的数据明文泄露。
+3. **运行时安全**：采用纵深防御（非 root、只读根文件系统、最小 capabilities、Seccomp、资源限制），降低容器逃逸和滥用的影响。
+4. **最小权限身份**：Sandbox 的 ServiceAccount 只拥有完成工作所需的最小权限，默认不授予 Kubernetes API 访问权。
+5. **可管理的生命周期**：Sandbox 能按需创建、暂停、恢复和回收，且故障时能自动恢复。
+6. **可验证的隔离**：通过正向和负向实验确认隔离有效。
 
 ## 架构与工作机制
 
 ### 核心原则：One Person, One Namespace, One Pod, One Encrypted Volume
 
-本书采用确定性的隔离策略：**每位员工拥有独立的 Namespace、独立的 Pod、独立的加密持久化存储。** 不做共享 Namespace 的折中。
+本书采用确定性的隔离策略：**每位员工拥有独立的 Namespace、独立的 Pod、独立的加密持久化存储。**
 
 ```
 hermes-agent-alice/          ← Namespace
@@ -65,18 +67,6 @@ hermes-agent-alice/          ← Namespace
 hermes-agent-bob/            ← 完全独立的 Namespace
   ...
 ```
-
-#### 为什么不做共享 Namespace 的折中？
-
-| 维度 | 共享 Namespace + Label 隔离 | 每员工独立 Namespace |
-|------|---------------------------|---------------------|
-| RBAC | 需要复杂 LabelSelector 和精细 Role 配置 | Kubernetes RBAC 天然按 Namespace 隔离 |
-| NetworkPolicy | 需要 `podSelector` 精确匹配，配置错误导致越权 | Namespace 级别的默认拒绝，作用域清晰 |
-| 审计 | 日志中混杂所有员工，需过滤 Label | `kubectl logs -n hermes-agent-alice` 天然隔离 |
-| 误操作影响 | 一个 `kubectl delete` 可能影响所有 Sandbox | Namespace 删除只影响该员工 |
-| 管理开销 | 500 个 Pod 在一个 Namespace | 500 个 Namespace，但可通过 Controller 自动化 |
-
-**结论**：管理开销的增加可以通过自动化消除，但隔离的强度一旦做弱就很难事后补救。独立 Namespace 是纵深防御的第一层，不是可选项。
 
 ### Sandbox 的 Kubernetes 资源组成
 

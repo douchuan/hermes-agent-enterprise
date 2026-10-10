@@ -122,6 +122,16 @@ Alice Agent Sandbox        Bob Agent Sandbox
 - 日志与 Trace 可能包含敏感数据，必须考虑脱敏、访问控制和保留期限。
 - 安全审计不能只依赖模型生成的解释；关键决策应记录由系统实际执行的策略和结果。
 
+### 4.7 持久化存储与数据加密
+
+- Kubernetes Namespace 和 PVC 本身不自动提供数据加密。必须由实际选用的存储后端、CSI 驱动或底层平台实现并启用加密。
+- 每位员工的 Hermes Agent 拥有独立的 Namespace、Pod 和持久化数据空间。持久化存储默认启用存储后端提供的透明静态加密（Transparent Encryption at Rest）。
+- 优先使用云平台或存储后端原生支持的加密能力，通过成熟的 KMS 管理密钥。第一版不开发应用层信封加密中间件，也不自行实现加密文件系统。
+- 区分独立持久化卷、数据加密密钥（DEK）、密钥加密密钥（KEK）和每员工独立 KMS 密钥。独立卷并不必然要求每员工一把独立的 KMS 主密钥。
+- 透明静态加密主要保护落盘数据，并不自动阻止有权限读取已挂载卷的进程访问明文。必须通过工作负载身份、RBAC、存储权限和网络策略共同保护运行时数据。
+- 对备份、快照、恢复、密钥轮换和员工离职后的数据处理制定明确策略。删除 PVC 不一定意味着底层数据、快照和备份均已删除。
+- 不得仅凭 PVC 存在、Pod 正常运行或配置文件出现加密字段，就断言数据已得到保护。必须通过实际平台配置或 API 验证加密状态。
+
 ## 5. 推荐技术栈
 
 以下是参考选型，不是必须全部引入的固定清单：
@@ -134,6 +144,8 @@ Alice Agent Sandbox        Bob Agent Sandbox
 - Tool Integration：Tool Gateway / MCP Server
 - Metadata：PostgreSQL
 - Secrets：Vault 或云端 Secret Manager
+- Storage：云盘（如 AWS EBS）+ CSI Driver，启用透明静态加密
+- KMS：云平台密钥管理服务（如 AWS KMS），管理存储加密密钥
 - Observability：OpenTelemetry
 - Egress Auditing：CrabTrap 或同类代理
 
@@ -225,11 +237,13 @@ Alice Agent Sandbox        Bob Agent Sandbox
 - 理解企业 Hermes Agent 平台的整体架构和信任边界；
 - 理解员工身份、Agent 身份和工作负载身份的区别；
 - 搭建相互隔离的员工 Agent Sandbox；
+- 配置员工级持久化存储的透明静态加密，并验证加密生效；
 - 通过网络策略限制未经允许的出站连接；
 - 通过 Tool Gateway 实施企业资源级授权；
 - 对高风险工具操作实施审批和审计；
 - 关联一次请求中的模型调用、工具执行与策略决策；
 - 使用安全验收清单验证系统的基本控制；
+- 执行密钥轮换、备份恢复和员工离职数据清理流程；
 - 识别方案的限制、假设和剩余风险。
 
 **最高优先级：架构与事实正确，其次是实现路径清楚，最后才是文字润色。**

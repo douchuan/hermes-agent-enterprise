@@ -58,8 +58,7 @@
 ```
 hermes-agent-alice/          ← Namespace
   pod/agent                  ← Pod（单实例）
-  pvc/agent-data             ← 加密 PersistentVolume
-  pvc/agent-memory           ← 加密 PersistentVolume
+  pvc/agent-data             ← 加密 PersistentVolume（工作目录 + Memory）
   serviceaccount/agent       ← 最小权限身份
   networkpolicy/default-deny ← 网络策略（第 6 章）
 
@@ -87,7 +86,7 @@ hermes-agent-bob/            ← 完全独立的 Namespace
 |------|------|
 | Namespace | 物理隔离边界，所有资源归属其中 |
 | Pod | 运行 Hermes Agent 进程（单实例） |
-| PersistentVolumeClaim (加密) | 持久化工作目录、Memory、会话 |
+| PersistentVolumeClaim (加密) | 持久化工作目录、Memory、会话（一个 PVC） |
 | ServiceAccount | 最小权限的工作负载身份 |
 | ResourceQuota | 该 Namespace 的资源上限 |
 | NetworkPolicy | 网络出站控制（第 6 章） |
@@ -199,12 +198,14 @@ spec:
 
       volumeMounts:
         # 工作目录（可读写）
-        - name: workspace
+        - name: data
           mountPath: /home/hermes/workspace
+          subPath: workspace
 
-        # Memory 存储（可读写）
-        - name: memory
+        # Memory 存储（可读写，同一 PVC 下的不同子目录）
+        - name: data
           mountPath: /home/hermes/memory
+          subPath: memory
 
         # 配置文件（只读）
         - name: config
@@ -228,13 +229,9 @@ spec:
   # --- 卷定义 ---
 
   volumes:
-    - name: workspace
+    - name: data
       persistentVolumeClaim:
         claimName: agent-data
-
-    - name: memory
-      persistentVolumeClaim:
-        claimName: agent-memory
 
     - name: config
       configMap:
@@ -362,64 +359,126 @@ ResourceQuota 限制该员工 Sandbox 的总资源消耗（防止创建大量 Po
 
 ### 持久化存储：每员工一个独立 Namespace、一个 Pod、一个加密 Volume
 
-每个员工的 Sandbox 在其独立 Namespace 中只挂载**一个**加密的 PersistentVolume，用于存储工作目录和 Memory：
+每个员工的 Sandbox 在其独立 Namespace 中只挂载**一个**加密的 PersistentVolume，用于存储工作目录、Memory、会话和其他需要跨 Pod 重建保留的数据。
 
 ```yaml
 # examples/05/pvc.yaml
 # Alice 的 Namespace 中的存储配置
+# 参考实现：AWS EBS + EBS CSI Driver + KMS
 
 ---
-# 1. 使用 encrypted StorageClass（由云提供商或本地 CSI 驱动提供）
+# 1. StorageClass 启用 EBS 加密
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
   name: encrypted-ssd
-provisioner: kubernetes.io/no-provisioner  # 替换为实际 CSI，如 ebs.csi.aws.com
+provisioner: ebs.csi.aws.com           # AWS EBS CSI Driver
 parameters:
-  encrypted: "true"                        # AWS EBS 加密
-  kmsKeyId: "alias/hermes-agent-key"       # 指定 KMS 密钥
+  encrypted: "true"                    # EBS 卷创建时启用加密
+  kmsKeyId: "alias/hermes-agent-ebs"   # KMS 密钥（共享 KEK）
   fsType: ext4
 volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+reclaimPolicy: Delete                  # PVC 删除时自动销毁底层 EBS 卷
 ---
 # 2. 每员工 Namespace 中只创建一个 PVC
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: agent-data                         # 该 Namespace 中唯一的 Volume
+  name: agent-data                     # 该 Namespace 中唯一的 Volume
   namespace: hermes-agent-alice
 spec:
   accessModes:
-    - ReadWriteOnce                        # 只能被一个 Pod 挂载
+    - ReadWriteOnce                    # 只能被一个 Pod 挂载
   storageClassName: encrypted-ssd
   resources:
     requests:
       storage: 20Gi
 ```
 
-**一个 Volume 而不是多个**：工作目录和 Memory 放在同一个加密 PVC 下的不同子目录中（通过 `subPath` 或 Pod 内路径区分），减少存储管理的复杂度，同时保持加密覆盖全部持久化数据。
+**一个 Volume 而不是多个**：工作目录和 Memory 放在同一个加密 PVC 下的不同子目录中（通过 `subPath` 区分），减少存储管理的复杂度，同时确保加密覆盖全部持久化数据。
 
-**加密方式取决于存储后端**：
+#### 透明静态加密：工作原理
+
+透明静态加密（Transparent Encryption at Rest）意味着：
+
+1. **加密发生在存储层**：数据写入磁盘时由存储服务自动加密，读取时自动解密。Hermes Agent 使用标准文件读写接口，不需要感知加解密过程。
+2. **KMS 提供密钥**：存储后端从 KMS 获取数据加密密钥（DEK），用于实际加密数据。KMS 本身不直接加解密文件——它管理密钥。
+3. **加密覆盖全部落盘数据**：EBS 卷的每个块都经过加密，包括文件系统元数据。
+
+以 AWS EBS 为例的加密流程：
+
+```
+Hermes Agent 写入文件
+    ↓（标准 ext4 文件系统写入）
+EBS 卷（节点侧）
+    ↓（从 KMS 获取数据密钥 DEK）
+EBS 加密模块
+    ↓（使用 DEK 加密数据块）
+物理存储介质（密文落盘）
+```
+
+- EBS 卷在创建时由 EBS CSI Driver 调用 AWS API 并指定 `encrypted: true` 和 KMS key。
+- AWS EBS 为每个卷生成唯一的数据加密密钥（DEK），该 DEK 本身由 KMS 密钥（KEK）加密后存储。
+- 当 EBS 卷挂载到 EC2 节点时，节点侧的 EBS 模块透明地解密读取的数据、加密写入的数据。
+- 如果 KMS key 被禁用或删除，该 EBS 卷将无法再被挂载（解密失败）。
+
+#### 加密方式取决于存储后端
 
 | 存储后端 | 加密方式 | 说明 |
 |----------|----------|------|
-| AWS EBS | EBS Encryption + KMS | 卷在创建时自动加密，解密在节点侧透明完成 |
-| GCP PD | GCE PD Encryption + Cloud KMS | 同上 |
-| Azure Disk | Azure Disk Encryption / SSE + CMK | 支持客户管理的密钥（CMK） |
-| Ceph RBD | LUKS + cryptsetup | 需要 CSI 驱动支持，或使用 Ceph 原生加密 |
-| Local PV | dm-crypt / LUKS | 手动加密，适合测试环境 |
+| AWS EBS | EBS Encryption + KMS | 卷创建时自动加密，节点侧透明解密 |
+| GCP PD | GCE PD Encryption + Cloud KMS | 默认启用 Google 管理的密钥，也可指定 CMK |
+| Azure Disk | SSE + CMK | 支持客户管理的密钥（CMK） |
+| Ceph RBD | LUKS + cryptsetup | 需要 CSI 驱动支持或 Ceph 原生加密 |
+| 自建 Kubernetes | 取决于存储后端 | 必须由实际 CSI 驱动提供加密能力 |
 
-**每员工一个 KMS 密钥还是共享？**
+**重要提醒**：Kubernetes PVC 本身不提供加密。`StorageClass` 的 `encrypted: "true"` 只是向 CSI 驱动传递参数，实际加密由 CSI 驱动和底层存储后端实现。如果选用的存储后端没有加密能力，PVC 中的数据将是明文。
 
-- **共享 KMS 密钥**（推荐起步方案）：所有员工的 Volume 使用同一个 KMS key，管理简单。如果 KMS key 泄露，所有 Volume 都受影响。
-- **每员工一个 KMS 密钥**：更强的隔离，但 KMS key 数量随员工增长。适合合规要求严格的环境。
+#### 密钥层级：DEK 与 KEK
 
-**为什么必须加密？** 第 8 章的安全边界表会提到：
+理解以下区别很重要：
+
+| 概念 | 说明 | 谁管理 |
+|------|------|--------|
+| 数据加密密钥（DEK） | 实际加密数据的密钥，每个 EBS 卷唯一 | 存储后端（如 AWS EBS） |
+| 密钥加密密钥（KEK） | 加密 DEK 的密钥，存储在 KMS 中 | KMS（如 AWS KMS） |
+| 每员工独立 KMS 密钥 | 每个员工拥有自己的 KMS CMK | KMS + 平台管理 |
+| 共享 KMS 密钥 | 所有员工卷共享同一把 KMS CMK | KMS + 平台管理 |
+
+**参考实现采用共享 KEK 方案**：所有员工的 EBS 卷使用同一把 KMS CMK（`alias/hermes-agent-ebs`）。原因：
+
+- AWS EBS 已经为每个卷生成独立的 DEK。即使使用共享 KEK，不同卷的加密数据密钥也不同。
+- 管理简单：500 个员工不需要管理 500 把 KMS 密钥。
+- KMS 提供密钥策略、审计和轮换能力，可以控制谁可以使用这把密钥。
+
+**何时需要每员工独立 KMS 密钥？**
+
+- 合规要求（如 PCI DSS、HIPAA）明确要求每个租户独立密钥。
+- 需要单独禁用/销毁某个员工的密钥而不影响其他员工。
+- 组织层面有严格的密钥隔离策略。
+
+如果采用每员工独立 KMS 密钥，必须额外说明：密钥创建、密钥策略配置、轮换调度、员工离职后密钥销毁的自动化流程。
+
+#### 透明加密的保护边界
+
+**必须明确指出**：透明静态加密主要保护落盘数据（data at rest），并不自动阻止有权限读取已挂载卷的进程访问明文。
+
+因此，以下断言是**错误**的：
+
+- "启用卷加密后，其他员工自然无法访问该卷。" → 错误。需要 RBAC + Namespace 隔离。
+- "启用 KMS 后，平台管理员必然无法读取数据。" → 错误。KMS key 策略可能允许管理员使用密钥。
+- "数据已经加密，所以无需 RBAC、存储授权或工作负载隔离。" → 错误。加密不替代运行时访问控制。
+- "删除 PVC 就一定意味着底层数据、快照和备份均已删除。" → 错误。需要确认 `reclaimPolicy` 和备份策略。
+
+**透明加密能防范的威胁**：
 
 | 威胁 | 未加密 | 加密 |
 |------|--------|------|
 | 存储后端被入侵（如 Ceph 节点被攻破） | 数据明文可读 | 数据被加密保护 |
 | PVC 备份文件泄露 | Memory 内容完全暴露 | 需要 KMS key 才能解密 |
 | 磁盘退役后数据残留 | 物理介质可能被恢复 | 密钥销毁即不可读 |
+| 快照被未授权下载 | 快照内容明文可读 | 快照继承卷加密 |
 
 ## 实现步骤
 
@@ -959,15 +1018,24 @@ Control Plane 在员工首次登录或管理员激活时创建 Sandbox（见 5.1
 ```
 1. 将 Pod replicas 设为 0（停止 Pod）
 2. 导出审计日志和会话记录（归档到长期存储）
-3. 销毁加密 Volume 的 KMS key 或标记 Volume 待删除
+3. 根据数据保留策略处理 PVC：
+   a. 需要保留过渡期：暂停 PVC，设置 retain 标签
+   b. 无需保留：删除 PVC，底层加密 EBS 卷随 reclaimPolicy: Delete 自动销毁
 4. 删除整个 Namespace（级联删除其中所有资源）
-5. 等待 PVC 终止（可选：保留一段过渡期后删除）
-6. 更新元数据：标记员工为"已回收"
+5. 更新元数据：标记员工为"已回收"
 ```
+
+**数据保留策略**：
+
+员工离职后，其数据不应立即销毁。建议：
+
+- **30 天保留期**：PVC 标记 `retain=true`，不删除。如有数据恢复需求，可重建 Pod 挂载。
+- **保留期结束后**：删除 PVC。由于 `reclaimPolicy: Delete`，底层 EBS 卷被销毁。如果使用了 KMS 密钥轮换，旧版本密钥按 KMS 策略自动禁用。
+- **合规要求**：如果法律法规要求更长的保留期（如 1-7 年），PVC 数据应归档到长期存储（如 AWS S3 Glacier），并加密存储。归档后删除 PVC。
 
 ```typescript
 // examples/05/sandbox-recycle.ts
-async function recycleSandbox(employeeId: string): Promise<void> {
+async function recycleSandbox(employeeId: string, options?: { immediate?: boolean }): Promise<void> {
   const ns = `hermes-agent-${employeeId}`;
 
   // 1. 停止 Pod
@@ -980,31 +1048,126 @@ async function recycleSandbox(employeeId: string): Promise<void> {
   // 2. 导出审计日志（伪代码）
   await exportAuditLogs(employeeId);
 
-  // 3. 销毁 KMS key 或标记 Volume 待删除
-  await destroyEncryptionKey(employeeId);
+  if (options?.immediate) {
+    // 立即删除：直接删除 Namespace，PVC 随 reclaimPolicy 删除
+    await coreV1.deleteNamespace(ns);
+  } else {
+    // 保留过渡期：先给 PVC 加 retain 标签，延迟删除
+    await tagPVCForRetention(ns, "agent-data", {
+      retain: "true",
+      retentionUntil: "2026-11-09",  // 30 天后
+      employeeId: employeeId,
+    });
+    // 删除 Namespace（PVC 由于 retain 标签保留策略，不随 Namespace 删除）
+    await deleteNamespaceExceptPVCs(ns);
+  }
 
-  // 4. 删除整个 Namespace（级联删除其中所有资源）
-  await coreV1.deleteNamespace(ns);
-
-  // 5. 更新元数据：标记员工为"已回收"
+  // 3. 更新元数据：标记员工为"已回收"
   await markEmployeeRecycled(employeeId);
 }
 ```
 
-### 故障恢复
+**注意**：参考实现使用共享 KMS 密钥。回收员工时**不需要**销毁或禁用 KMS 密钥——该密钥同时被其他活跃员工使用。如果需要立即阻止某员工数据被解密（极端场景），且使用了每员工独立 KMS 密钥，可以禁用该员工的专属密钥。
 
-| 故障 | 检测方式 | 恢复方式 |
-|------|----------|----------|
-| Agent 进程崩溃 | Liveness Probe 失败 | Deployment 自动重启 |
-| 节点故障 | Pod 状态 NotReady | Deployment 在其他节点重建 |
-| PVC 损坏 | Agent 启动失败 | 从备份恢复 PVC 数据 |
-| 镜像拉取失败 | Pod 状态 ImagePullBackOff | 检查镜像仓库凭证和网络 |
-| 内存超限 (OOM) | Pod 被 OOM Kill | 调查原因（可能是内存泄漏），调整 limit 或修复代码 |
+### 备份与恢复
 
-**自动恢复的限制**：自动重启不解决根本原因。如果 Agent 因为特定输入反复崩溃，需要：
-1. 从审计日志查看崩溃前的操作。
-2. 修复 Hermes Agent 的 bug 或调整配置。
-3. 必要时由管理员手动介入。
+每个员工的 PVC 数据需要定期备份，以应对数据损坏、误删或需要回滚的场景。
+
+**备份策略**：
+
+1. **CSI VolumeSnapshot**：使用 Kubernetes CSI VolumeSnapshot 功能，对 EBS 卷创建时间点快照。
+2. **加密继承**：EBS Snapshot 自动继承源卷的加密状态。使用 KMS 加密的 EBS 卷，其快照也是加密的。
+3. **备份频率**：根据数据重要性设定（如每日一次）。
+4. **快照保留**：保留最近 N 个快照或 N 天的快照，过期自动删除。
+
+```yaml
+# examples/05/volume-snapshot-class.yaml
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: ebs-snapshot-class
+driver: ebs.csi.aws.com
+deletionPolicy: Retain   # 快照不随 VolumeSnapshot 删除而删除
+parameters:
+  tagSpecification_1: "hermes-agent-backup=true"
+---
+# examples/05/volume-snapshot.yaml
+# 为 Alice 的 PVC 创建快照（在她的 Namespace 中执行）
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata:
+  name: agent-data-snapshot
+  namespace: hermes-agent-alice
+spec:
+  volumeSnapshotClassName: ebs-snapshot-class
+  source:
+    persistentVolumeClaimName: agent-data
+```
+
+**恢复流程**：
+
+```
+1. 从 VolumeSnapshot 创建新的 PVC
+2. 将新 PVC 挂载到员工 Sandbox（替换损坏的 PVC）
+3. 验证数据完整性
+```
+
+```yaml
+# examples/05/pvc-restore.yaml
+# 从快照恢复 PVC
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agent-data-restored
+  namespace: hermes-agent-alice
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: encrypted-ssd
+  resources:
+    requests:
+      storage: 20Gi
+  dataSource:
+    name: agent-data-snapshot         # 从快照恢复
+    kind: VolumeSnapshot
+    apiGroup: snapshot.storage.k8s.io
+```
+
+**恢复注意事项**：
+
+- 恢复的 PVC 使用相同的加密 StorageClass，因此新卷也使用相同的 KMS 密钥加密。
+- 恢复操作不应将数据交给错误的员工——新 PVC 必须创建在正确的 Namespace 中。
+- 恢复后，更新 Deployment 的 PVC 引用，并重启 Pod。
+
+### 密钥轮换
+
+KMS 密钥需要定期轮换，以降低密钥泄露后的影响窗口。
+
+**AWS KMS 自动轮换**：
+
+- AWS KMS 支持自动轮换 CMK（Customer Managed Key），每年轮换一次。
+- 轮换后，KMS 保留旧版本密钥用于解密历史数据，新数据使用新密钥加密的 DEK。
+- **EBS 卷不受 KMS 自动轮换影响**：EBS 卷创建后，其 DEK 不变。KMS 轮换只影响新创建的卷。
+- 如果需要更新现有 EBS 卷的密钥，必须创建新卷并迁移数据。
+
+**手动轮换流程**：
+
+```
+1. 在 KMS 中创建新版本的 CMK（或启用新的 CMK）
+2. 更新 StorageClass，引用新的 KMS 密钥别名
+3. 新建 PVC 使用新密钥
+4. 将旧 PVC 数据迁移到新 PVC（rsync 或备份恢复）
+5. 更新 Pod 挂载新 PVC
+6. 旧 PVC 数据确认迁移完成后，删除旧 PVC
+7. 禁用旧 KMS 密钥版本（等待确认无遗留依赖后）
+```
+
+**轮换期间的风险控制**：
+
+- 不要在业务高峰期轮换密钥。
+- 轮换前确认备份可用。
+- 轮换后验证新 PVC 可以正常挂载和读写。
+- 禁用旧密钥前，确认没有遗留的快照、备份或离线卷仍依赖旧密钥。
 
 ## 验证实验与预期结果
 
@@ -1032,7 +1195,7 @@ kubectl exec -n hermes-agent-bob agent -- \
 
 ### 实验 2：存储隔离与加密验证
 
-**目标**：验证每个 Namespace 有独立的加密 PVC。
+**目标**：验证每个 Namespace 有独立的加密 PVC，且底层存储确实启用了加密。
 
 **步骤**：
 
@@ -1045,12 +1208,29 @@ kubectl exec -n hermes-agent-alice agent -- \
 kubectl exec -n hermes-agent-bob agent -- \
   sh -c 'cat /home/hermes/workspace/alice-secret.txt'
 
-# 3. 验证 PVC 加密状态（以 AWS EBS 为例）
+# 3. 验证 PVC 使用了加密 StorageClass
 kubectl get pvc agent-data -n hermes-agent-alice -o jsonpath='{.spec.storageClassName}'
-# 输出应为 "encrypted-ssd" 或类似的加密 StorageClass
+# 输出应为 "encrypted-ssd"
+
+# 4. 通过 AWS CLI 验证底层 EBS 卷确实加密（参考实现：AWS EBS）
+# 先获取 PVC 对应的 Volume ID
+VOLUME_ID=$(kubectl get pvc agent-data -n hermes-agent-alice \
+  -o jsonpath='{.spec.volumeName}')
+PV_NAME=$(kubectl get pv "$VOLUME_ID" -o jsonpath='{.spec.csi.volumeHandle}')
+
+# 查询 EBS 卷加密状态
+aws ec2 describe-volumes --volume-ids "$PV_NAME" \
+  --query 'Volumes[0].{Encrypted:Encrypted, KmsKeyId:KmsKeyId}'
 ```
 
-**预期结果**：第二条命令失败（文件不存在）。Bob 的 PVC 是独立的，无法访问 Alice 的数据。
+**预期结果**：
+- 第二条命令失败（文件不存在）。
+- 第三条命令输出 `encrypted-ssd`。
+- 第四条命令返回 `{"Encrypted": true, "KmsKeyId": "arn:aws:kms:...:alias/hermes-agent-ebs"}`。
+
+**失败判定**：`Encrypted: false` 或 PVC 未使用加密 StorageClass。
+
+**剩余风险**：此实验验证了卷创建时的加密配置，但不验证实际数据是否确实加密落盘（这需要底层存储的审计日志）。
 
 ### 实验 3：进程隔离
 
@@ -1169,6 +1349,135 @@ kubectl get pod agent -n hermes-agent-bob
 
 **预期结果**：删除 Alice 的 Namespace 后，Bob 的 Sandbox 不受任何影响。这验证了 Namespace 隔离的有效性。
 
+### 实验 9：Pod 重建后数据保留验证
+
+**目标**：验证删除并重建员工 A 的 Pod 后，授权保留的数据仍可正常访问。
+
+**步骤**：
+
+```bash
+# 1. 在 Alice 的 Pod 中写入数据
+kubectl exec -n hermes-agent-alice agent -- \
+  sh -c 'echo "persistent data" > /home/hermes/workspace/important.txt'
+
+# 2. 删除 Pod（Deployment 会自动重建）
+kubectl delete pod agent -n hermes-agent-alice
+
+# 3. 等待 Pod 重建完成
+kubectl wait --for=condition=Ready pod/agent -n hermes-agent-alice --timeout=120s
+
+# 4. 验证数据仍然存在
+kubectl exec -n hermes-agent-alice agent -- \
+  sh -c 'cat /home/hermes/workspace/important.txt'
+```
+
+**预期结果**：第四步输出 `persistent data`。证明 PVC 数据在 Pod 重建后保留。
+
+### 实验 10：备份与恢复验证
+
+**目标**：验证可以从快照恢复 PVC 数据。
+
+**前置条件**：已完成实验 2，Alice 的 PVC 中有数据。
+
+**步骤**：
+
+```bash
+# 1. 创建 VolumeSnapshot
+kubectl apply -f examples/05/volume-snapshot.yaml -n hermes-agent-alice
+
+# 2. 等待快照就绪
+kubectl wait --for=jsonpath='{.status.readyToUse}=true' \
+  volumesnapshot/agent-data-snapshot -n hermes-agent-alice --timeout=300s
+
+# 3. 从快照创建新 PVC
+kubectl apply -f examples/05/pvc-restore.yaml -n hermes-agent-alice
+
+# 4. 验证恢复的 PVC 包含原始数据
+# 创建临时 Pod 挂载恢复的 PVC
+kubectl run temp-restore-test --image=busybox --rm -it \
+  -n hermes-agent-alice \
+  --overrides='{"spec":{"containers":[{"name":"test","image":"busybox","command":["sh"],"args":["-c","cat /data/important.txt"],"volumeMounts":[{"name":"restored","mountPath":"/data"}]}],"volumes":[{"name":"restored","persistentVolumeClaim":{"claimName":"agent-data-restored"}}],"restartPolicy":"Never"}}'
+```
+
+**预期结果**：临时 Pod 输出 `persistent data`。
+
+**失败判定**：快照创建超时，或恢复的 PVC 中数据缺失。
+
+**剩余风险**：此实验验证了快照和恢复的流程正确性，但不验证快照本身的加密状态（实验 2 已覆盖卷加密）。
+
+### 实验 11：KMS 权限隔离验证
+
+**目标**：验证无权管理密钥的身份不能修改关键密钥策略或执行未授权的密钥管理操作。
+
+**前置条件**：AWS 环境，已配置 IAM 角色和 KMS 密钥策略。
+
+**步骤**：
+
+```bash
+# 1. 使用普通员工角色尝试禁用 KMS 密钥
+AWS_PROFILE=hermes-employee aws kms disable-key \
+  --key-id "$(aws kms describe-key --key-id alias/hermes-agent-ebs \
+    --query 'KeyMetadata.KeyId' --output text)"
+
+# 2. 使用普通员工角色尝试修改密钥策略
+AWS_PROFILE=hermes-employee aws kms put-key-policy \
+  --key-id alias/hermes-agent-ebs \
+  --policy-name default \
+  --policy '{"Version":"2012-10-17","Statement":[]}'
+
+# 3. 使用管理员角色（应该有权限）执行相同操作
+AWS_PROFILE=hermes-admin aws kms describe-key \
+  --key-id alias/hermes-agent-ebs \
+  --query 'KeyMetadata.{KeyId:KeyId,KeyState:KeyState,Enabled:Enabled}'
+```
+
+**预期结果**：
+- 第一步和第二步返回 `AccessDeniedException`。
+- 第三步成功返回密钥信息。
+
+**失败判定**：普通员工角色成功执行了密钥管理操作。
+
+**剩余风险**：此实验验证了 KMS 管理权限的隔离，但不验证密钥使用权限（`kms:Decrypt`、`kms:GenerateDataKey`）。后者应由 EBS CSI Driver 的 IAM Role 控制。
+
+### 实验 12：员工离职后数据生命周期验证
+
+**目标**：验证员工离职后，身份、凭证、工作负载和存储数据按照既定策略处理。
+
+**步骤**：
+
+```bash
+# 1. 确认 Charlie 的 Sandbox 正常运行
+kubectl get all -n hermes-agent-charlie
+
+# 2. 执行回收流程（伪代码，实际由 Control Plane 执行）
+# kubectl scale deployment agent -n hermes-agent-charlie --replicas=0
+
+# 3. 验证 Pod 已停止
+kubectl get pod agent -n hermes-agent-charlie
+# 应返回 "No resources found" 或 replicas=0
+
+# 4. 验证 PVC 数据仍保留（保留期内）
+kubectl get pvc agent-data -n hermes-agent-charlie
+# PVC 应仍然存在，带有 retain=true 标签
+
+# 5. 尝试从已停止的 Sandbox 读取数据（应该失败，因为 Pod 不存在）
+kubectl exec -n hermes-agent-charlie agent -- ls /home/hermes/workspace
+# 应返回 Pod not found 错误
+
+# 6. 保留期结束后，删除 Namespace
+kubectl delete namespace hermes-agent-charlie
+
+# 7. 验证 PVC 已被删除（reclaimPolicy: Delete）
+kubectl get pv | grep charlie
+# 应返回空
+```
+
+**预期结果**：Pod 停止后数据不可访问，保留期结束后 PVC 和底层加密卷被销毁。
+
+**失败判定**：Pod 停止后仍能通过其他方式访问 PVC 数据，或 Namespace 删除后 PV 仍然存在（reclaimPolicy 不正确）。
+
+**剩余风险**：此实验验证了 Kubernetes 层面的数据清理，但不验证底层 EBS 卷是否确实被销毁（需要 AWS CloudTrail 审计）。如果使用了快照或备份，需要独立验证这些副本的清理。
+
 ## 常见问题与故障排查
 
 ### Pod 无法启动：`RunAsNonRoot` 检查失败
@@ -1254,8 +1563,10 @@ kubectl exec -it agent-alice -n hermes-agents -- sh
 | 进程通过系统调用攻击内核 | Seccomp RuntimeDefault | 中（取决于 seccomp 配置覆盖度） |
 | 单个 Agent 消耗过多资源 | ResourceQuota | 强 |
 | Agent 访问 Kubernetes API | automountServiceAccountToken: false | 强 |
-| 存储后端被入侵时数据泄露 | PVC 加密 | 强 |
-| PVC 备份文件泄露 | 需要 KMS key 才能解密 | 强 |
+| 存储后端被入侵时数据泄露 | PVC 透明静态加密 + KMS | 强 |
+| PVC 备份/快照泄露 | 加密卷的备份继承加密 | 强 |
+| 磁盘退役后数据残留 | 密钥销毁即不可读 | 强 |
+| 未授权身份修改 KMS 密钥策略 | KMS 最小权限策略 | 强 |
 
 ### 本章方案不能防范什么
 
@@ -1265,8 +1576,10 @@ kubectl exec -it agent-alice -n hermes-agents -- sh
 | Agent 通过网络直接连接外部系统 | NetworkPolicy + Egress Proxy（第 6 章） |
 | 内核漏洞导致容器逃逸（标准容器） | gVisor 或 Kata Containers |
 | Hermes Agent 镜像中的供应链漏洞 | 镜像签名验证、SBOM、漏洞扫描（第 12 章） |
-| KMS key 泄露导致加密 Volume 可被解密 | KMS key 轮换、访问审计、每员工独立 key |
+| 有挂载权限的进程读取 PVC 明文数据 | 加密保护落盘数据，运行时隔离依赖 Namespace + RBAC |
 | 控制平面被攻破后任意 Namespace 操作 | 控制平面自身的安全加固（第 13、14 章） |
+| KMS 管理员滥用权限 | 云平台 KMS 访问审计、密钥策略审批流程 |
+| 快照/备份被有权限的管理员恢复并读取 | 审计日志、访问控制、备份加密 |
 
 ### 取舍
 
@@ -1276,6 +1589,8 @@ kubectl exec -it agent-alice -n hermes-agents -- sh
 4. **标准容器 vs gVisor vs Kata**：默认使用标准容器 + 纵深防御，因为大多数企业 Agent 执行的是可信工具调用。当 Agent 需要执行不可信 Shell 或代码时，升级到 gVisor 或 Kata。
 5. **只读根文件系统**：增加了运维复杂度（需要预先知道所有写入路径），但大幅减少了攻击面。
 6. **加密存储的权衡**：加密增加了少量 I/O 延迟（通常 < 5%），但防止了存储后端被入侵时的数据泄露。对于高合规要求的行业（金融、医疗、政府），加密是强制要求。
+7. **共享 KEK vs 每员工独立 KMS 密钥**：参考实现使用共享 KEK，因为 EBS 已为每个卷生成独立 DEK。共享 KEK 管理简单，但在密钥泄露时影响范围更大。如果合规要求每员工独立密钥，必须增加密钥创建、轮换、撤销的自动化。
+8. **PVC reclaimPolicy: Delete**：简化了员工离职后的数据清理，但意味着删除 PVC 后无法恢复。如果需要恢复能力，应先用 VolumeSnapshot 备份再删除。
 
 ## 本章小结
 
@@ -1284,10 +1599,12 @@ kubectl exec -it agent-alice -n hermes-agents -- sh
 1. **核心原则**：One Person, One Namespace, One Pod, One Encrypted Volume。不做共享 Namespace 的折中。
 2. **Namespace 隔离**：Kubernetes RBAC 天然按 Namespace 隔离，NetworkPolicy 作用域清晰，删除操作影响范围可控。
 3. **纵深防御**：非 root、只读根文件系统、移除所有 capabilities、Seccomp、资源限制。
-4. **加密持久化存储**：每个员工一个独立的加密 PVC，使用云提供商或 CSI 驱动提供的加密 StorageClass。
-5. **最小权限身份**：`automountServiceAccountToken: false`，默认不访问 Kubernetes API。
-6. **生命周期管理**：创建、暂停、回收和故障恢复的完整流程。回收时通过 `kubectl delete namespace` 级联删除。
-7. **更强隔离**：当标准容器不够时，使用 gVisor 或 Kata Containers。
+4. **加密持久化存储**：每个员工一个独立的加密 PVC，使用存储后端提供的透明静态加密，由 KMS 管理密钥。
+5. **透明加密的保护边界**：加密保护落盘数据，不替代运行时访问控制。通过 subPath 在同一 PVC 下区分工作目录和 Memory。
+6. **最小权限身份**：`automountServiceAccountToken: false`，默认不访问 Kubernetes API。
+7. **生命周期管理**：创建、暂停、回收、备份、恢复和故障恢复的完整流程。回收时按数据保留策略处理 PVC，而不是立即销毁。
+8. **密钥轮换**：KMS 密钥定期轮换，EBS 卷的 DEK 不受自动轮换影响，更新现有卷需要数据迁移。
+9. **更强隔离**：当标准容器不够时，使用 gVisor 或 Kata Containers。
 
 Sandbox 解决了计算和存储隔离的问题。但 Agent 仍然可能通过网络访问未授权的目标，或向 Tool Gateway 发起恶意工具调用——这分别由第 6 章（网络策略）和第 7 章（Tool Gateway 授权）解决。
 
@@ -1301,4 +1618,8 @@ Sandbox 解决了计算和存储隔离的问题。但 Agent 仍然可能通过�
 - Kata Containers 文档：https://katacontainers.io/docs/
 - Kubernetes ResourceQuota：https://kubernetes.io/docs/concepts/policy/resource-quotas/
 - Kubernetes LimitRange：https://kubernetes.io/docs/concepts/policy/limit-range/
+- AWS EBS 加密：https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/EBSEncryption.html
+- AWS EBS CSI Driver：https://docs.aws.amazon.com/zh_cn/eks/latest/userguide/ebs-csi.html
+- AWS KMS 密钥轮换：https://docs.aws.amazon.com/kms/latest/developerguide/rotate-keys.html
+- Kubernetes CSI VolumeSnapshot：https://kubernetes.io/docs/concepts/storage/volume-snapshots/
 - 参考案例：Razorpay Hermes 部署的网络隔离与 Sandbox 实践 https://engineering.razorpay.com/running-hermes-at-razorpay-a-network-isolated-self-improving-second-brain-for-every-employee-f91d56bea3f1

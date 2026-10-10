@@ -1,0 +1,19 @@
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Build outputs
+dist/
+build/
+node_modules/
+target/
+
+# Local secrets and environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/

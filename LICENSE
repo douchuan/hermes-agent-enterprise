@@ -1,0 +1,44 @@
+# Hermes Agent 企业部署实践
+
+本技术书籍及其配套示例代码采用以下双重许可：
+
+## 文本内容（章节正文、说明文字等）
+
+采用 **Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0)** 许可。
+
+完整协议文本见：<https://creativecommons.org/licenses/by-sa/4.0/legalcode.zh-hans>
+
+### 协议要点
+
+你有权：
+
+- **共享** — 在任何媒介以任何形式复制、发行本作品
+- **演绎** — 修改、转换或以本作品为基础进行创作
+- 用于任何目的，包括商业目的
+
+只要你遵守以下条件：
+
+- **署名** — 你必须给出适当的署名，提供本许可协议的链接，并标明是否对原始作品进行了修改。你可以用任何合理的方式进行，但不得以任何方式暗示许可方认可你或你的使用。
+- **相同方式共享** — 如果你再混合、转换或者基于本作品进行创作，你必须基于与原始作品相同的 CC BY-SA 4.0 许可来分发你的贡献。
+
+### 署名格式
+
+> 《Hermes Agent 企业部署实践》，采用 CC BY-SA 4.0 许可，来源：<https://github.com/your-org/hermes-agent-enterprise>
+
+## 代码示例（examples/ 目录中的代码）
+
+采用 **MIT License** 许可，详见 `examples/LICENSE-CODE`。
+
+## 不属于本许可的内容
+
+本仓库中的商标、logo 和其他品牌标识不属于 CC BY-SA 4.0 或 MIT 许可的范围。未经事先书面许可，不得使用这些标识来认可或推广基于本作品的衍生作品。
+
+## 免责声明
+
+本作品按"现状"提供，不承担任何担保或保证，无论明示或暗示，包括但不限于适销性、特定用途适用性和不侵权的担保。
+
+---
+
+完整 CC BY-SA 4.0 协议（英文版）：<https://creativecommons.org/licenses/by-sa/4.0/legalcode>
+
+完整 CC BY-SA 4.0 协议（中文版）：<https://creativecommons.org/licenses/by-sa/4.0/legalcode.zh-hans>

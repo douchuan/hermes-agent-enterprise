@@ -1,0 +1,25 @@
+# LimitRange —— 为容器设置默认和上下限资源
+#
+# 即使 Pod 没有显式声明 resources，LimitRange 也会应用默认值。
+# 这防止了未配置资源限制的 Pod 消耗无限资源。
+
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: agent-default-limits
+  namespace: hermes-agents
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: "1"
+        memory: 2Gi
+      defaultRequest:
+        cpu: 500m
+        memory: 1Gi
+      max:
+        cpu: "4"
+        memory: 8Gi
+      min:
+        cpu: 100m
+        memory: 128Mi

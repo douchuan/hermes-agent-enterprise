@@ -1,0 +1,33 @@
+# PersistentVolumeClaim —— 每员工独立的持久化存储
+#
+# workspace：Agent 的工作目录，存放临时文件、操作产物等
+# memory：Agent 的长期记忆，需要定期备份
+#
+# accessModes: ReadWriteOnce —— 同一时刻只有一个 Pod 可以挂载
+# 这防止了多个 Sandbox 意外共享存储。
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: workspace-alice
+  namespace: hermes-agents
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: memory-alice
+  namespace: hermes-agents
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 5Gi

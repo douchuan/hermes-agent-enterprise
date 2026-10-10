@@ -1,0 +1,134 @@
+# 完整的 Agent Sandbox Pod 配置
+# 对应第 5 章正文中的 Pod 示例
+#
+# 部署前需替换：
+#   - 镜像地址 (ghcr.io/example-org/hermes-agent:v1.2.3)
+#   - employee 和 tenant 标签值
+#   - 资源限制（根据实际集群容量调整）
+#   - StorageClass 名称
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: agent-alice
+  namespace: hermes-agents
+  labels:
+    app: hermes-agent
+    employee: alice
+    tenant: acme-corp
+spec:
+  # --- 容器运行时安全 ---
+
+  # 禁止使用 hostNetwork、hostPID、hostIPC
+  hostNetwork: false
+  hostPID: false
+  hostIPC: false
+
+  # 使用非 root 用户运行进程
+  securityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    runAsNonRoot: true
+    fsGroup: 1000
+
+  # 自动挂载 ServiceAccount Token 设为 false
+  automountServiceAccountToken: false
+
+  containers:
+    - name: hermes-agent
+      image: ghcr.io/example-org/hermes-agent:v1.2.3
+      imagePullPolicy: Always
+      workingDir: /home/hermes/workspace
+
+      command: ["/usr/bin/hermes-agent"]
+      args:
+        - "--config=/etc/hermes/config.yaml"
+        - "--workspace=/home/hermes/workspace"
+        - "--memory=/home/hermes/memory"
+
+      # --- 安全上下文 ---
+
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+
+      # --- 资源限制 ---
+
+      resources:
+        requests:
+          cpu: "500m"
+          memory: "1Gi"
+        limits:
+          cpu: "2"
+          memory: "4Gi"
+
+      # --- 端口 ---
+
+      ports:
+        - name: api
+          containerPort: 8080
+          protocol: TCP
+
+      # --- 健康检查 ---
+
+      readinessProbe:
+        httpGet:
+          path: /healthz
+          port: 8080
+        initialDelaySeconds: 10
+        periodSeconds: 5
+        timeoutSeconds: 3
+        failureThreshold: 3
+
+      livenessProbe:
+        httpGet:
+          path: /healthz
+          port: 8080
+        initialDelaySeconds: 30
+        periodSeconds: 15
+        timeoutSeconds: 5
+        failureThreshold: 3
+
+      # --- 卷挂载 ---
+
+      volumeMounts:
+        - name: workspace
+          mountPath: /home/hermes/workspace
+        - name: memory
+          mountPath: /home/hermes/memory
+        - name: config
+          mountPath: /etc/hermes
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+
+      # --- 环境变量 ---
+
+      env:
+        - name: HERMES_EMPLOYEE_ID
+          value: "alice"
+        - name: HERMES_TENANT_ID
+          value: "acme-corp"
+
+  # --- 卷定义 ---
+
+  volumes:
+    - name: workspace
+      persistentVolumeClaim:
+        claimName: workspace-alice
+
+    - name: memory
+      persistentVolumeClaim:
+        claimName: memory-alice
+
+    - name: config
+      configMap:
+        name: agent-alice-config
+
+    - name: tmp
+      emptyDir:
+        medium: Memory
+        sizeLimit: 256Mi

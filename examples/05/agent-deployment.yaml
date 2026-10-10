@@ -1,0 +1,120 @@
+# 使用 Deployment 管理的 Agent Sandbox
+# 相比直接创建 Pod，Deployment 提供自动重启和滚动更新能力
+#
+# strategy.type: Recreate —— Agent 不支持多实例同时运行
+# replicas: 1 —— 每员工一个实例
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-alice
+  namespace: hermes-agents
+  labels:
+    app: hermes-agent
+    employee: alice
+    tenant: acme-corp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hermes-agent
+      employee: alice
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: hermes-agent
+        employee: alice
+        tenant: acme-corp
+    spec:
+      hostNetwork: false
+      hostPID: false
+      hostIPC: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        fsGroup: 1000
+      automountServiceAccountToken: false
+
+      containers:
+        - name: hermes-agent
+          image: ghcr.io/example-org/hermes-agent:v1.2.3
+          imagePullPolicy: Always
+          workingDir: /home/hermes/workspace
+          command: ["/usr/bin/hermes-agent"]
+          args:
+            - "--config=/etc/hermes/config.yaml"
+            - "--workspace=/home/hermes/workspace"
+            - "--memory=/home/hermes/memory"
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+
+          ports:
+            - name: api
+              containerPort: 8080
+              protocol: TCP
+
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          volumeMounts:
+            - name: workspace
+              mountPath: /home/hermes/workspace
+            - name: memory
+              mountPath: /home/hermes/memory
+            - name: config
+              mountPath: /etc/hermes
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+
+          env:
+            - name: HERMES_EMPLOYEE_ID
+              value: "alice"
+            - name: HERMES_TENANT_ID
+              value: "acme-corp"
+
+      volumes:
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: workspace-alice
+        - name: memory
+          persistentVolumeClaim:
+            claimName: memory-alice
+        - name: config
+          configMap:
+            name: agent-alice-config
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 256Mi

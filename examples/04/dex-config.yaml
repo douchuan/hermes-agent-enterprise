@@ -1,0 +1,58 @@
+# Dex 本地 OIDC 配置
+#
+# 仅用于本地开发与集成测试，不得用于生产环境。
+# 详细文档：https://dexidp.io/docs/
+#
+# 注意：Dex 的 YAML 配置不支持 ${VAR} 环境变量展开。
+# Client Secret 在此直接写入（仅用于本地开发）。
+
+# Issuer URL：本地开发通过 localhost 访问
+issuer: http://localhost:5556/dex
+
+# Web 监听地址（容器内）
+web:
+  http: 0.0.0.0:5556
+
+# 存储：本地开发使用内存存储（重启后数据丢失，可接受）
+# 生产环境应使用 postgres、sqlite3 等
+storage:
+  type: memory
+
+# 启用本地静态密码连接器
+enablePasswordDB: true
+
+# 静态密码用户
+# 密码使用 bcrypt 哈希。生成方式：
+#   htpasswd -bnBC 10 "" "YOUR_PASSWORD" | tr -d ':\n'
+# 以下哈希对应密码 "password"（仅用于本地测试）。
+staticPasswords:
+  - email: "alice@example.com"
+    # bcrypt hash of "password"
+    hash: "$2y$10$Ideu8IC25x0AoX7dbrQpV.u3lGqiL7er4FWujG/kP4EHLuG6YxfPu"
+    username: "alice"
+    userID: "08a8684b-db88-4b73-90a9-3cd1661f5466"
+  - email: "bob@example.com"
+    # bcrypt hash of "password"
+    hash: "$2y$10$Ideu8IC25x0AoX7dbrQpV.u3lGqiL7er4FWujG/kP4EHLuG6YxfPu"
+    username: "bob"
+    userID: "18b8684b-db88-4b73-90a9-3cd1661f5467"
+  # 跨租户测试用户：Carol 属于另一个租户（other-tenant）
+  - email: "carol@otherorg.com"
+    # bcrypt hash of "password"
+    hash: "$2y$10$Ideu8IC25x0AoX7dbrQpV.u3lGqiL7er4FWujG/kP4EHLuG6YxfPu"
+    username: "carol"
+    userID: "28c8684b-db88-4b73-90a9-3cd1661f5468"
+
+# 静态客户端（Control Plane）
+# secret 仅在本地开发使用。生产环境必须通过机密管理工具注入。
+staticClients:
+  - id: hermes-control-plane
+    redirectURIs:
+      - "http://localhost:3000/auth/callback"
+    name: "Hermes Control Plane"
+    # ⚠️ 仅用于本地开发。生产环境请通过 Dex API 或密钥管理工具管理。
+    secret: "not-a-real-secret-dev-only"
+
+# 注意：当 enablePasswordDB: true 时，Dex 自动启用本地密码连接器，
+# ID 为 "local"。无需在 connectors 中显式声明。
+# 参考：https://dexidp.io/docs/connectors/local/

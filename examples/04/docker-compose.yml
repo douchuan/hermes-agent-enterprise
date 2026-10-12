@@ -1,0 +1,21 @@
+# Dex 本地 OIDC 环境
+#
+# 仅用于本地开发与集成测试。
+# 启动：docker compose up -d
+# 停止：docker compose down
+
+services:
+  dex:
+    image: ghcr.io/dexidp/dex:v2.41.1
+    container_name: hermes-dex
+    command: ["dex", "serve", "/etc/dex/config.docker.yaml"]
+    ports:
+      - "5556:5556"
+    volumes:
+      - ./dex-config.yaml:/etc/dex/config.docker.yaml:ro
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5556/dex/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s

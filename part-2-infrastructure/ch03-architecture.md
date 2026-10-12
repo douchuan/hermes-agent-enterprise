@@ -79,7 +79,7 @@ Employee (Browser / CLI)
 
 **职责**：员工与平台交互的界面入口。
 
-- 提供 OIDC 登录（通过企业 IdP，如 Okta、Azure AD、Google Workspace）
+- 提供 OIDC 登录（通过企业 IdP，如 Okta、Azure AD、Google Workspace；本地开发使用 Dex）
 - 展示 Agent 会话界面，显示模型的回复、工具调用和结果
 - 提供审批工作流界面（当高风险操作需要人工审批时）
 - 将用户的认证状态传递给 Control Plane
@@ -236,6 +236,8 @@ Enterprise Systems                  外部 API / 互联网
 
 ```
 1. 员工浏览器 → IdP（OIDC 登录）
+   - 正式环境：企业 IdP（Google Workspace、Okta、Azure AD 等）
+   - 本地开发/测试：Dex（开源 OIDC Provider，预置静态测试用户）
 2. IdP → 浏览器（授权码）
 3. 浏览器 → Control Plane（授权码 + PKCE verifier）
 4. Control Plane → IdP（换取 Access Token / ID Token）
@@ -434,5 +436,6 @@ Enterprise Systems                  外部 API / 互联网
 
 - Kubernetes 多租户隔离：https://kubernetes.io/docs/concepts/security/pod-security-standards/
 - OIDC Authorization Code Flow with PKCE：https://openid.net/specs/openid-connect-core-1_0.html
+- Dex（本地 OIDC Provider）：https://dexidp.io/
 - MCP（Model Context Protocol）：https://modelcontextprotocol.io/
 - 参考案例：Razorpay Hermes 部署实践 https://engineering.razorpay.com/running-hermes-at-razorpay-a-network-isolated-self-improving-second-brain-for-every-employee-f91d56bea3f1

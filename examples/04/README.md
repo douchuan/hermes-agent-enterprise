@@ -6,8 +6,12 @@
 
 ```
 examples/04/
-├── dex-config.yaml          # Dex 本地 OIDC 配置
-├── docker-compose.yml       # Docker Compose 启动 Dex
+├── k8s/                     # Dex Kubernetes 部署配置
+│   ├── namespace.yaml       # hermes-dev Namespace
+│   ├── configmap.yaml       # Dex 配置 ConfigMap
+│   ├── deployment.yaml      # Dex Deployment（含健康检查、资源限制）
+│   ├── service.yaml         # Dex ClusterIP Service
+│   └── kustomization.yaml   # Kustomize 编排
 ├── README.md                # 本文件
 ├── .env.example             # 环境变量模板
 └── control-plane/           # Control Plane 最小参考实现
@@ -24,14 +28,58 @@ examples/04/
             └── api.ts       # 受保护的 API（演示授权）
 ```
 
+## 前置条件
+
+- Kubernetes 集群（本地开发推荐 kind、minikube 或 Docker Desktop 内置 k8s）
+- `kubectl` 已安装并配置好上下文
+- Node.js 22+（运行 Control Plane）
+
 ## 快速开始
 
-### 1. 启动 Dex（本地 OIDC Provider）
+### 1. 确认集群上下文
 
 ```bash
-cd examples/04
-docker compose up -d
+kubectl cluster-info
+kubectl config current-context
 ```
+
+如果本地没有可用集群，可以使用 kind 快速创建：
+
+```bash
+kind create cluster --name hermes-dev
+```
+
+### 2. 部署 Dex
+
+```bash
+kubectl apply -k examples/04/k8s/
+```
+
+等待 Pod 就绪：
+
+```bash
+kubectl -n hermes-dev rollout status deployment/dex --timeout=60s
+```
+
+检查 Pod 和 Service 状态：
+
+```bash
+kubectl -n hermes-dev get pods
+kubectl -n hermes-dev get svc dex
+```
+
+### 3. 本地访问 Dex（port-forward）
+
+Dex 的 Service 类型为 ClusterIP，仅在集群内部可访问。
+本地开发通过 `kubectl port-forward` 暴露到 localhost：
+
+```bash
+kubectl -n hermes-dev port-forward svc/dex 5556:5556 &
+```
+
+> **注意**：port-forward 仅用于本地开发，不是生产环境的网络入口方案。
+> Dex 的 `issuer` 配置为 `http://localhost:5556/dex`，与 port-forward 访问地址一致，
+> 确保浏览器、发现文档和 ID Token 中的 `iss` 声明相互匹配。
 
 验证 Dex 正常运行：
 
@@ -39,14 +87,14 @@ docker compose up -d
 # 健康检查
 curl http://localhost:5556/dex/healthz
 
-# 查看 OIDC 发现文档
+# OIDC 发现文档
 curl http://localhost:5556/dex/.well-known/openid-configuration
 
-# 查看 JWKS（公钥）
+# JWKS（公钥）
 curl http://localhost:5556/dex/keys
 ```
 
-### 2. 启动 Control Plane
+### 4. 启动 Control Plane
 
 ```bash
 cd examples/04/control-plane
@@ -56,7 +104,7 @@ npm run dev
 
 默认监听 `http://localhost:3000`。
 
-### 3. 完成登录
+### 5. 完成登录
 
 1. 浏览器打开 `http://localhost:3000`
 2. 点击 "Login via OIDC"
@@ -70,7 +118,7 @@ npm run dev
 | Bob | bob@example.com | password | tenant-acme-001 |
 | Carol | carol@otherorg.com | password | tenant-other-002 |
 
-### 4. 验证授权
+### 6. 验证授权
 
 登录后，尝试访问：
 
@@ -80,7 +128,7 @@ npm run dev
 
 使用 Carol 登录后，反过来验证：Carol 不能访问 `tenant-acme-001`。
 
-### 5. 切换到 Google OIDC（生产环境示例）
+### 7. 切换到 Google OIDC（生产环境示例）
 
 设置环境变量即可切换，无需修改业务代码：
 
@@ -96,28 +144,48 @@ npm run dev
 ## 安全说明
 
 - Dex 的静态密码 **仅用于本地开发**，不得用于生产环境。
-- `dex-config.yaml` 中的 Client Secret 是开发用占位符。生产环境必须通过 Vault、KMS 或云平台密钥管理工具注入。
+- ConfigMap 中的 Client Secret 是开发用占位符。生产环境必须通过 Kubernetes Secret 和外部 Secret Manager（Vault、云 KMS）注入。
 - `.env.example` 提供了环境变量模板，不要提交真实凭证到仓库。
 - Control Plane 的 Session store 使用内存（express-session 默认），生产环境应切换为 Redis。
 
-## 停止与清理
+## 清理
 
 ```bash
-cd examples/04
-docker compose down
+# 停止 port-forward
+kill %1 2>/dev/null || true
+
+# 删除所有 Kubernetes 资源
+kubectl delete -k examples/04/k8s/
+
+# 如果使用 kind，删除集群
+kind delete cluster --name hermes-dev
 ```
 
 ## 故障排查
 
-### Dex 无法启动
+### Dex Pod 无法启动
 
 ```bash
-docker compose logs dex
+kubectl -n hermes-dev describe pod -l app=dex
+kubectl -n hermes-dev logs -l app=dex
 ```
 
 常见原因：
-- 端口 5556 被占用
-- `dex-config.yaml` 语法错误（检查 YAML 缩进）
+- 镜像拉取失败（网络问题）
+- ConfigMap 未创建（先执行 `kubectl apply -k`）
+
+### 健康检查失败
+
+```bash
+kubectl -n hermes-dev get endpoints dex
+```
+
+确认 Service 正确关联到 Dex Pod。
+
+### OIDC Issuer 不匹配
+
+如果 ID Token 中的 `iss` 与应用的 `OIDC_ISSUER_URL` 不一致，登录将失败。
+Dex 的 `issuer` 配置为 `http://localhost:5556/dex`，与 `OIDC_ISSUER_URL` 环境变量默认值一致。
 
 ### 登录后回到首页，仍然显示未认证
 

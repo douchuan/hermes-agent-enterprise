@@ -22,8 +22,12 @@
 ```
 examples/
 ├── 04/                          # 身份认证与授权
-│   ├── dex-config.yaml          # Dex 配置
-│   ├── docker-compose.yml       # Dex 容器编排
+│   ├── k8s/                     # Dex Kubernetes 部署配置
+│   │   ├── namespace.yaml
+│   │   ├── configmap.yaml       # Dex 配置
+│   │   ├── deployment.yaml
+│   │   ├── service.yaml
+│   │   └── kustomization.yaml
 │   ├── .env.example             # 环境变量模板
 │   ├── README.md                # 身份认证实验说明
 │   └── control-plane/           # Control Plane 参考实现
@@ -55,14 +59,28 @@ examples/
 ### 步骤 1：启动 Dex
 
 ```bash
-cd examples/04
-docker compose up -d
+# 确认集群上下文
+kubectl cluster-info
+kubectl config current-context
+
+# 部署 Dex
+kubectl apply -k examples/04/k8s/
+
+# 等待 Pod 就绪
+kubectl -n hermes-dev rollout status deployment/dex --timeout=60s
+
+# 检查 Pod 和 Service
+kubectl -n hermes-dev get pods
+kubectl -n hermes-dev get svc dex
+
+# 本地访问 Dex（port-forward，仅用于开发环境）
+kubectl -n hermes-dev port-forward svc/dex 5556:5556 &
 ```
 
 验证 Dex 正常运行：
 
 ```bash
-# 健康检查 — 应返回 {"health":"ok"} 或 "Health check passed"
+# 健康检查 — 应返回 "Health check passed"
 curl http://localhost:5556/dex/healthz
 
 # OIDC 发现文档 — 应返回 JWKS 端点、授权端点等
@@ -199,7 +217,7 @@ npm run dev
 
 | 检查项 | 方法 | 预期结果 |
 |--------|------|----------|
-| Dex 能正常启动 | `curl http://localhost:5556/dex/health` | `{"health":"ok"}` |
+| Dex 能正常启动 | `curl http://localhost:5556/dex/healthz` | "Health check passed" |
 | OIDC 发现文档可访问 | `curl .../.well-known/openid-configuration` | 返回端点和 JWKS URI |
 | 应用能发起登录 | 浏览器访问 `/auth/login` | 重定向到 Dex |
 | 登录成功并回调 | 用 Alice 登录 | 重定向到首页，显示用户信息 |
@@ -215,12 +233,13 @@ npm run dev
 ### Dex 无法启动
 
 ```bash
-docker compose logs dex
+kubectl -n hermes-dev describe pod -l app=dex
+kubectl -n hermes-dev logs -l app=dex
 ```
 
 常见原因：
-- 端口 5556 被占用：`lsof -i :5556`
-- 配置文件 YAML 缩进错误
+- 镜像拉取失败（网络问题）
+- ConfigMap 未创建（先执行 `kubectl apply -k`）
 
 ### 登录后回调失败
 

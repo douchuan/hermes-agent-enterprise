@@ -289,7 +289,7 @@ router.get("/tenant/:tenantId/sandbox", requireAuth, (req, res) => {
 ### 为什么选择 Dex
 
 Dex 是一个开源的 OIDC Provider（https://dexidp.io/），它可以：
-- 通过 Docker 一行命令启动
+- 通过 Kubernetes Deployment 一行命令部署到本地集群
 - 预置静态测试用户，无需注册流程
 - 完整实现 OIDC 协议（Discovery、JWKS、Authorization Code Flow）
 - 与 Google OIDC 使用同一套应用代码，仅 Issuer 不同
@@ -298,9 +298,17 @@ Dex **不**负责多租户授权、Sandbox 隔离或 Tool Gateway 授权。它�
 
 ### 启动 Dex
 
+在本地 Kubernetes 集群中部署：
+
 ```bash
-cd examples/04
-docker compose up -d
+kubectl apply -k examples/04/k8s/
+kubectl -n hermes-dev rollout status deployment/dex --timeout=60s
+```
+
+本地访问 Dex（port-forward，仅用于开发环境）：
+
+```bash
+kubectl -n hermes-dev port-forward svc/dex 5556:5556
 ```
 
 验证 Dex 正常运行：
@@ -318,7 +326,7 @@ curl http://localhost:5556/dex/keys
 
 ### 预置测试用户
 
-`dex-config.yaml` 中定义了三个测试用户：
+`k8s/configmap.yaml` 中定义了三个测试用户：
 
 | 用户 | 邮箱 | 密码 | 租户 | 用途 |
 |------|------|------|------|------|
@@ -368,16 +376,21 @@ export SESSION_SECRET=your-production-session-secret
 ### 本地测试的安全边界
 
 - Dex 的静态密码 **仅用于本地开发**。生产环境禁止使用。
-- `dex-config.yaml` 中的 Client Secret 是开发用占位符。生产环境必须通过 Vault、KMS 或云平台密钥管理工具注入。
+- ConfigMap 中的 Client Secret 是开发用占位符。生产环境必须通过 Vault、KMS 或云平台密钥管理工具注入。
 - Dex 只提供身份认证。多租户隔离、Tool Gateway 授权、Sandbox 安全等由平台其他组件负责。
 
 ## 常见问题与故障排查
 
 ### Dex 无法启动
 
-- 检查端口 5556 是否被占用：`lsof -i :5556`
-- 检查 `dex-config.yaml` 语法：`cat examples/04/dex-config.yaml` 确认缩进正确
-- 查看日志：`docker compose logs dex`
+```bash
+kubectl -n hermes-dev describe pod -l app=dex
+kubectl -n hermes-dev logs -l app=dex
+```
+
+常见原因：
+- 镜像拉取失败（网络问题）
+- ConfigMap 未创建（先执行 `kubectl apply -k`）
 
 ### 登录后仍然显示未认证
 

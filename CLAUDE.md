@@ -151,6 +151,24 @@ Alice Agent Sandbox        Bob Agent Sandbox
 
 保持架构尽量简单。只有当组件解决了明确的安全、运维或可扩展性问题时才引入它。选型需核实版本、维护状态、部署复杂度和替代方案。
 
+## 5.1 部署与编排约束
+
+**Kubernetes 是本书唯一的容器编排平台。** 所有容器化参考实现必须提供 Kubernetes 部署配置。
+
+规则：
+
+1. **Kubernetes 是唯一目标平台** — 包括 Hermes Agent、Control Plane、Dex、Tool Gateway、Egress Proxy 及所有其他平台服务。
+2. **部署使用 Kubernetes 原生资源** — Deployment、Service、ConfigMap、Secret、Namespace、NetworkPolicy/CiliumNetworkPolicy、Ingress 或 Gateway API。按需使用最小集合，不机械使用全部资源。
+3. **本地开发也以 Kubernetes 为运行环境** — 使用 kind、minikube 或 Docker Desktop 内置 k8s。只引入一种本地集群工具，不引入多个。当前优先使用 kind。
+4. **禁止使用 Docker Compose 作为部署或编排方案** — 不得将 Docker Compose 用于任何服务的部署、编排、启动或验收。Docker 可用于镜像构建，但不能替代 Kubernetes 作为编排平台。
+5. **凭证与配置分离** — 非敏感配置使用 ConfigMap，敏感凭证使用 Kubernetes Secret 并通过外部 Secret Manager（Vault、云 KMS）注入。不得将实际密码、Client Secret 或 Token 提交到 Git。
+6. **最小权限原则** — ServiceAccount、Role、RoleBinding 仅授予完成职责所需的最小权限。
+7. **服务发现与通信按 Kubernetes 架构设计** — 使用 ClusterIP Service、Service DNS、port-forward（仅本地开发）等 Kubernetes 原生机制，不依赖外部编排工具的服务发现。
+8. **违反约束必须先报告并修正** — 发现已有实现使用 Docker Compose 或其他编排方案时，不得继续沿用，必须迁移到 Kubernetes。
+9. **例外需用户明确批准** — 只有在用户明确提出并批准的情况下，才可引入其他容器编排方案。
+
+这些约束适用于所有后续章节、代码示例和 AI 生成的内容。写作和编码时必须遵守。
+
 ## 6. 全书结构
 
 章节导航以 `SUMMARY.md` 为准。当前规划为 5 个部分、14 章：

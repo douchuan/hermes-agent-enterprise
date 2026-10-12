@@ -16,5 +16,5 @@
 
 | 目录 | 对应章节 | 说明 |
 |------|----------|------|
-| [`04/`](04/README.md) | 第 4 章 | Dex 本地 OIDC 环境 + Control Plane 最小参考实现 |
+| [`04/`](04/README.md) | 第 4 章 | Dex 本地 OIDC 环境（Kubernetes 部署） + Control Plane 最小参考实现 |
 | [`05/`](05/README.md) | 第 5 章 | Agent Sandbox 配置（PVC、Deployment、NetworkPolicy 等） |

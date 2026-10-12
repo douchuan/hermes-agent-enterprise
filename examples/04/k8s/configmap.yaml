@@ -1,0 +1,59 @@
+# Dex 配置
+#
+# 通过 ConfigMap 挂载到 Dex 容器。
+# 仅用于本地开发与集成测试。
+# 生产环境：将敏感字段（client secret）放入 Kubernetes Secret，
+# 并通过 Secret Manager 管理密钥。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dex-config
+  namespace: hermes-dev
+  labels:
+    app: dex
+    app.kubernetes.io/name: dex
+    app.kubernetes.io/part-of: hermes-agent-platform
+data:
+  config.yaml: |
+    # Issuer URL：本地开发通过 port-forward 访问 localhost
+    issuer: http://localhost:5556/dex
+
+    # Web 监听地址
+    web:
+      http: 0.0.0.0:5556
+
+    # 存储：本地开发使用内存存储
+    # 生产环境应使用 postgres 或 sqlite3
+    storage:
+      type: memory
+
+    # 启用本地静态密码连接器
+    enablePasswordDB: true
+
+    # 静态密码用户（bcrypt 哈希）
+    # ⚠️ 仅用于本地开发，不得用于生产环境
+    # 密码均为 "password"
+    staticPasswords:
+      - email: "alice@example.com"
+        hash: "$2y$10$QyvURM/tP863aumUtcmvRO4eezBCVgzfH8CWz8ero1bI3lhWW5qtW"
+        username: "alice"
+        userID: "08a8684b-db88-4b73-90a9-3cd1661f5466"
+      - email: "bob@example.com"
+        hash: "$2y$10$QyvURM/tP863aumUtcmvRO4eezBCVgzfH8CWz8ero1bI3lhWW5qtW"
+        username: "bob"
+        userID: "18b8684b-db88-4b73-90a9-3cd1661f5467"
+      - email: "carol@otherorg.com"
+        hash: "$2y$10$QyvURM/tP863aumUtcmvRO4eezBCVgzfH8CWz8ero1bI3lhWW5qtW"
+        username: "carol"
+        userID: "28c8684b-db88-4b73-90a9-3cd1661f5468"
+
+    # 静态客户端（Control Plane）
+    # ⚠️ secret 仅用于本地开发。生产环境必须通过 Secret 注入。
+    staticClients:
+      - id: hermes-control-plane
+        redirectURIs:
+          - "http://localhost:3000/auth/callback"
+        name: "Hermes Control Plane"
+        secret: "not-a-real-secret-dev-only"
+
+    # 当 enablePasswordDB: true 时，Dex 自动启用本地密码连接器

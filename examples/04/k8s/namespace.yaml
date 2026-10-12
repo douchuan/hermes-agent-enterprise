@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hermes-dev
+  labels:
+    app.kubernetes.io/name: hermes-dev
+    app.kubernetes.io/part-of: hermes-agent-platform

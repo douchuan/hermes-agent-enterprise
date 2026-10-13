@@ -16,5 +16,9 @@
 
 | 目录 | 对应章节 | 说明 |
 |------|----------|------|
+| [`01/`](01/README.md) | 第 1 章 | 单节点 Kubernetes 集群安装脚本 |
 | [`04/`](04/README.md) | 第 4 章 | Dex 本地 OIDC 环境（Kubernetes 部署） + Control Plane 最小参考实现 |
 | [`05/`](05/README.md) | 第 5 章 | Agent Sandbox 配置（PVC、Deployment、NetworkPolicy 等） |
+| [`07/credential-broker/`](07/credential-broker/README.md) | 第 7-8 章 | Credential Broker：临时凭证获取与审计 |
+| [`08/revocation-queue/`](08/revocation-queue/README.md) | 第 8 章 | 第三方授权撤销重试队列 |
+| [`11/memory-classifier/`](11/memory-classifier/README.md) | 第 11 章 | Memory 敏感信息分类器 |

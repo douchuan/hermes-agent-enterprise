@@ -22,10 +22,12 @@ Hermes Agent 的运行方式有所不同。它由 [Nous Research](https://github
 - **持续记忆（Memory）**：Hermes 会将工作中积累的上下文——用户偏好、项目信息、历史经验——以结构化的形式持久化存储，并在后续会话中加载到上下文中。这意味着 Agent 不需要每次重新了解员工的工作背景[^memory]。
 - **技能系统（Skills）**：Hermes 提供一套 Skill 机制，允许将工作方法封装为可复用的能力。Skill 以文件形式保存在 Agent 的运行环境中，支持创建、调用和更新。官方文档将其纳入一个"学习循环"（learning loop），Agent 可以基于工作体验创建新的 Skill[^skills]。
 - **工具调用能力**：Hermes 支持通过 MCP（Model Context Protocol）等机制连接外部工具和系统，执行代码、查询 API、操作文件等。它不是仅停留在文本生成层面，而是能够实际完成工作步骤。
-- **持续运行模式**：Hermes 支持 Bot Mode 和定时任务，可以作为长期运行的服务部署在服务器上，而不是仅在被打开时才响应。
+- **持续运行模式**：Hermes 提供 Gateway 模式，可以作为后台进程持续运行，处理会话、执行定时任务（cron）并支持 Bot Mode。CLI 模式则是每次调用时无状态的进程，但记忆和技能等持久化数据始终保存在磁盘上[^gateway]。
 
-[^memory]: Memory 的具体存储格式和加载机制取决于 Hermes 的版本和配置。本书第 2 章将结合具体版本深入分析其工作机制。
-[^skills]: 参见 Hermes Agent 官方文档关于 [Skills 的介绍](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/skills.md)。Skills 的创建和改进机制仍在持续演进中，本书后续章节会结合实际部署情况进一步讨论。
+[^gateway]: 参见 Hermes Agent 官方文档关于 [Gateway](https://hermes-agent.nousresearch.com/docs/user-guide/features/overview) 和 [Bot Mode](https://hermes-agent.nousresearch.com/docs/user-guide/bot-mode) 的介绍。Gateway 是一个运行 asyncio 事件循环的后台进程，每秒定期检查定时任务。
+
+[^memory]: 参见 Hermes Agent 官方文档关于 [Memory 的介绍](https://hermes-agent.nousresearch.com/docs/user-guide/features/memory)。记忆以 Markdown 文件形式持久化（如 `~/.hermes/memories/MEMORY.md` 和 `USER.md`），在每次会话启动时自动加载到系统提示中，而非由 Agent 主动调用。本书第 2 章将结合具体版本进一步分析。
+[^skills]: 参见 Hermes Agent 官方文档关于 [Skills](https://hermes-agent.nousresearch.com/docs/user-guide/features/skills) 和 [Curator](https://hermes-agent.nousresearch.com/docs/user-guide/features/curator) 的介绍。Skills 以 `SKILL.md` 文件形式保存，后台 review 进程约每 10 轮对话后可能创建新的 Skill，Curator 定期合并（需手动开启）。本书后续章节会结合实际部署情况进一步讨论。
 
 这些特征的组合，使得 Hermes Agent 更接近一个**持续参与工作的助手**，而不是仅在需要时才被召唤的工具。
 

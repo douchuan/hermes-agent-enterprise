@@ -1,0 +1,6 @@
+# Compiled JS (kept for local testing only)
+*.js
+*.js.map
+
+# Dependencies
+node_modules/

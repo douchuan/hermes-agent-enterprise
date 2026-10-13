@@ -69,6 +69,15 @@
 - [ ] Tool Gateway 不信任 Agent 传来的 `employee_id`、`tenant_id` 等参数
 - [ ] Skills 来源经过控制，未经审核的 Skill 不会被加载
 
+### 企业工具集成
+
+- [ ] MCP Server / Tool Adapter 不执行授权检查（授权由 Gateway 执行）
+- [ ] 工具 Adapter 不暴露任意 SQL 或任意 HTTP 请求能力
+- [ ] 高风险操作（财务批准、仓库删除、全员消息）需要审批
+- [ ] 幂等性处理防止 Agent 重试导致重复操作
+- [ ] 工具搜索结果遵循当前用户权限，不是 Memory 中的历史权限
+- [ ] 参数哈希校验防止审批后替换操作内容
+
 ### 审批与审计
 
 - [ ] 高风险操作可以被拦截、审批和追溯
@@ -76,6 +85,9 @@
 - [ ] 一次请求的模型调用、工具执行和策略判定可以通过关联 ID 串联
 - [ ] 日志和 Trace 中不包含明文凭证或 Memory 内容
 - [ ] 关键操作有审计证据，但日志不包含明文密钥
+- [ ] MCP Server / Adapter 故障时，不会绕过 Gateway 直接访问企业系统
+- [ ] 第三方授权撤销失败时，平台侧连接已禁用并产生告警
+- [ ] 审计事件关联用户、Agent、工具、资源和授权决策
 
 ### 备份与恢复
 
@@ -194,6 +206,95 @@
 | T9.1 | 转岗后 Memory 中仍有旧仓库 URL | 工具调用仍被拒绝 |
 | T9.2 | Skill 中定义了 `delete_repo` 步骤 | 高风险操作触发审批 |
 | T9.3 | 检查日志和审计事件 | 不包含 Token 值 |
+
+### T10：MCP Server / Adapter 故障隔离
+
+| 测试 | 步骤 | 预期结果 |
+|------|------|----------|
+| T10.1 | 停止 MCP Server / Adapter 进程 | 新工具调用返回错误，不绕过 Gateway 直连企业系统 |
+| T10.2 | Agent 尝试通过 Adapter 调用已停止的服务 | 返回 service unavailable，不泄露企业系统直连地址 |
+| T10.3 | 恢复 MCP Server / Adapter | 工具调用恢复正常 |
+
+### T11：跨租户越权
+
+| 测试 | 步骤 | 预期结果 |
+|------|------|----------|
+| T11.1 | Tenant A 的 Agent 尝试调用 Tenant B 的资源 | DENY：跨租户拒绝 |
+| T11.2 | Agent 在请求参数中伪造 `tenant_id` 为 Tenant B | DENY：以调用方身份识别的 tenant 为准 |
+| T11.3 | 审计日志中验证跨租户尝试被记录 | 审计事件包含尝试的 tenant 和真实的 tenant |
+
+### T12：参数篡改防护
+
+| 测试 | 步骤 | 预期结果 |
+|------|------|----------|
+| T12.1 | Agent 在请求中提交 `employee_id: "bob"` | DENY：以 mTLS 识别的身份为准 |
+| T12.2 | Agent 在请求中提交 `tenant_id: "other-tenant"` | DENY：以服务端映射的 tenant 为准 |
+| T12.3 | 审批通过后修改请求参数再执行 | DENY：参数哈希不匹配 |
+
+### T13：OAuth 授权失效
+
+| 测试 | 步骤 | 预期结果 |
+|------|------|----------|
+| T13.1 | 员工在 GitHub 端撤销 OAuth 授权 | 平台侧检测到 Token 失效 |
+| T13.2 | 撤销后发起新的工具调用 | DENY：授权连接标记为 expired/revoked |
+| T13.3 | 审计日志中包含失效事件 | EXTERNAL_AUTH_REVOKED 或 EXTERNAL_AUTH_EXPIRED |
+
+### T14：高风险操作审批
+
+| 测试 | 步骤 | 预期结果 |
+|------|------|----------|
+| T14.1 | Agent 尝试删除 GitHub 仓库 | REQUIRE_APPROVAL |
+| T14.2 | 未获审批时继续执行 | DENY：approval_pending |
+| T14.3 | 审批人批准后执行 | ALLOW，操作成功 |
+| T14.4 | 审批人拒绝后执行 | DENY：approval_denied |
+
+### T15：资源状态变化后重新校验
+
+| 测试 | 步骤 | 预期结果 |
+|------|------|----------|
+| T15.1 | 查询会议室空闲 → 其他人先预订 → Agent 尝试预订 | 预订失败，提示已被占用 |
+| T15.2 | 并发预订同一时间段同一会议室 | 一个成功，另一个失败并建议替代方案 |
+
+### T16：重试幂等性
+
+| 测试 | 步骤 | 预期结果 |
+|------|------|----------|
+| T16.1 | Agent 因超时重试采购申请创建 | 只创建一个申请（相同幂等 key） |
+| T16.2 | 使用不同幂等 key 重试 | 创建新的申请（正常行为） |
+
+### T17：第三方授权撤销失败
+
+| 测试 | 步骤 | 预期结果 |
+|------|------|----------|
+| T17.1 | 模拟第三方 API 返回 503（临时错误） | 撤销进入重试队列 |
+| T17.2 | 持续重试达到最大次数 | 发出告警，平台侧连接已禁用 |
+| T17.3 | 撤销失败期间发起新工具调用 | DENY：平台侧连接已禁用 |
+
+### T18：Token 不泄露
+
+| 测试 | 步骤 | 预期结果 |
+|------|------|----------|
+| T18.1 | 检查 Tool Gateway 日志 | 不包含 Token 值 |
+| T18.2 | 检查 OpenTelemetry Trace 属性 | 不包含 Token 值 |
+| T18.3 | 检查审计事件 | 不包含 Token 值 |
+| T18.4 | 检查 Agent 的 Memory 和工具结果 | 不包含 Token 值 |
+
+### T19：审计事件完整性
+
+| 测试 | 步骤 | 预期结果 |
+|------|------|----------|
+| T19.1 | 完成一次工具调用 | 审计事件包含 employee、agent、tool、resource、decision |
+| T19.2 | 通过 correlation_id 关联 | 所有事件串联为完整链路 |
+| T19.3 | 触发审批的操作 | 审计包含 AUTHORIZATION_CHECKED、APPROVAL_REQUESTED、APPROVAL_RESPONDED、TOOL_CALL_EXECUTED |
+
+### T20：转岗后旧权限阻断
+
+| 测试 | 步骤 | 预期结果 |
+|------|------|----------|
+| T20.1 | Alice 从研发部调到市场部 | 部门更新，Agent 身份保留 |
+| T20.2 | Alice 的 Agent 尝试使用旧部门 GitHub 工具 | DENY：授权连接已禁用 |
+| T20.3 | 检查 Memory 中的旧仓库 URL | 工具调用仍被拒绝（Memory ≠ 授权） |
+| T20.4 | 审计日志 | 包含 ORGANIZATION_CHANGED、PERMISSION_RECALCULATED、EXTERNAL_AUTH_DISABLED |
 
 ## 已知风险与剩余风险说明
 

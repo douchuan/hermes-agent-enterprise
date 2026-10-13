@@ -160,6 +160,85 @@ Audit: EXTERNAL_AUTH_REVOKED
 - 审计记录必须包含 `agent_id`、`external_auth_connection_id`、`old_department`、`new_department` 等字段，以便追溯完整的变更链路。
 - 不得在审计记录中记录 Token 值或任何秘密值。
 
+### MCP 工具调用的审计字段
+
+一次通过 MCP 协议执行的工具调用，应产生以下审计事件字段：
+
+```
+Audit: TOOL_CALL_EXECUTED
+├── correlation_id: "req-abc-123"
+├── employee_id: "alice"
+├── agent_id: "agent-alice-001"
+├── tenant_id: "acme-corp"
+├── session_id: "sess-xyz-456"
+├── tool_name: "github"                    ← MCP 工具名
+├── action: "create_pr"                    ← 具体操作
+├── resource: "org/backend-repo"           ← 目标资源
+├── authorization_decision: "ALLOW"        ← ALLOW / DENY / REQUIRE_APPROVAL
+├── authorization_reason: "..."            ← 决策原因
+├── external_auth_connection_id: "gh-alice-001"  ← 使用哪个外部授权连接
+├── approval_id: "apr-001"                 ← 如果触发了审批
+├── parameter_keys: ["repo", "title", "base", "head"]  ← 参数名列表（不含值）
+├── operation_status: "success"            ← 实际操作结果
+├── credential_source: "oauth_delegated"   ← 凭证来源类型
+├── adapter_name: "github-adapter"         ← 使用的 Adapter
+├── retry_count: 0                         ← 重试次数
+├── initiated_by: "agent-alice-001"
+├── timestamp: "2025-01-15T14:22:00Z"
+└── status: "success"
+```
+
+**不得记录的字段**：
+- `access_token`、`refresh_token`、`client_secret` 等任何凭证值。
+- 工具调用参数中的敏感值（如密码、Token、密钥）。可以用 `parameter_keys` 记录参数名列表，但不记录参数值。
+
+**审计完整性**：一次工具调用的完整审计链路应包含以下事件（视实际情况可能部分事件不产生）：
+
+1. **TOOL_CALL_RECEIVED**：Tool Gateway 收到调用请求。
+2. **AUTHORIZATION_CHECKED**：授权检查执行，记录决策结果。
+3. **CREDENTIAL_ACQUIRED**（如需要）：从 Credential Broker 获取凭证。
+4. **APPROVAL_REQUESTED**（如需要）：发起审批请求。
+5. **APPROVAL_RESPONDED**（如需要）：审批人响应。
+6. **TOOL_CALL_EXECUTED**：实际操作执行，记录结果。
+7. **AUDIT_WRITTEN**：审计事件写入独立存储。
+
+如果任何步骤缺失或顺序异常，应视为潜在的安全事件进行排查。
+
+### 第三方授权撤销失败的重试与告警
+
+当员工转岗或离职时，平台需要撤销其在第三方系统的授权。如果撤销失败：
+
+```
+Audit: EXTERNAL_AUTH_REVOCATION_RETRY
+├── employee_id: "alice"
+├── agent_id: "agent-alice-001"
+├── external_auth_connection_id: "gh-alice-001"
+├── external_auth_provider: "github"
+├── retry_attempt: 3                        ← 第几次重试
+├── failure_reason: "GitHub API 503 Service Unavailable"
+├── next_retry_at: "2025-01-15T10:35:00Z"   ← 下次重试时间
+├── max_retries: 10
+├── platform_connection_status: "disabled"  ← 平台侧已禁用
+└── timestamp: "2025-01-15T10:32:00Z"
+
+Audit: EXTERNAL_AUTH_REVOCATION_ALERT
+├── employee_id: "alice"
+├── external_auth_connection_id: "gh-alice-001"
+├── alert_type: "REVOCATION_MAX_RETRIES_REACHED"
+├── total_retries: 10
+├── initiated_by: "revocation-scheduler"
+├── alert_sent_to: ["security-team", "platform-team"]
+└── timestamp: "2025-01-15T12:30:00Z"
+```
+
+**告警触发条件**：
+
+- 撤销重试达到最大次数（如 10 次）。
+- 连续 N 次撤销失败（如 5 次）。
+- 第三方 API 返回非临时错误（如 401 意味着 Token 已被撤销或无效，不需要重试；但 503 是临时错误，需要重试）。
+
+**重要**：即使第三方撤销持续失败并触发告警，**平台侧的连接已禁用状态不受影响**。Tool Gateway 不再允许使用该连接发起新调用，撤销失败只意味着第三方系统中该 Token 可能仍然有效。这是"纵深防御"——平台侧是第一道防线，第三方撤销是第二道防线。
+
 ## 实现步骤
 
 ### OpenTelemetry 配置

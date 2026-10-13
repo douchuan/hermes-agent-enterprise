@@ -1,0 +1,12 @@
+{
+  "name": "hermes-tool-gateway",
+  "version": "0.1.0",
+  "description": "Reference implementation: Tool Gateway for Hermes Agent enterprise tool integration. Demonstrates caller identity verification, multi-dimensional authorization, audit logging, idempotency handling, and credential broker integration.",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "node index.test.js",
+    "build": "tsc"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

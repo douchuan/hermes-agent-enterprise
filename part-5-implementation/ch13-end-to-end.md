@@ -257,6 +257,89 @@ kubectl -n hermes-dev logs -l app=dex
 - 检查 Cookie：开发者工具 → Application → Cookies
 - 确认 `hermes-session` Cookie 存在且有值
 
+## 阶段 2：企业系统工具接入端到端案例（GitHub PR 创建）
+
+本阶段展示一次完整的工具调用链路：Agent 请求创建 GitHub PR → Tool Gateway 身份验证 → 授权检查 → Credential Broker 获取凭证 → Adapter 调用 GitHub API → 审计记录。
+
+这是参考设计，展示了各组件如何协作。完整的 Tool Gateway 参考代码见 `examples/07/tool-gateway/`。
+
+### 场景描述
+
+Alice（研发部工程师）通过自己的 Agent 创建 GitHub PR，将她的代码变更合并到 `backend-service` 仓库的 `main` 分支。
+
+### 完整链路
+
+```
+1. Alice 在 Web Console 输入："帮我把 feature/auth-fix 分支的代码合并到 main"
+2. Web Console → Control Plane（带 Session Cookie）
+3. Control Plane 验证 Session，路由到 Alice 的 Agent Sandbox
+4. Agent Sandbox 解析用户意图，决定调用 GitHub 工具创建 PR
+5. Agent → Tool Gateway（MCP tools/call 请求）
+   {
+     name: "github",
+     arguments: {
+       action: "create_pr",
+       repo: "acme/backend-service",
+       title: "Fix auth token validation",
+       body: "Fixes the token validation bug...",
+       head: "feature/auth-fix",
+       base: "main"
+     }
+   }
+6. Tool Gateway 执行完整链路：
+   a. 验证调用方身份（通过 mTLS 证书识别 Sandbox）
+   b. 查找 Sandbox → employeeId: "alice", tenantId: "acme-corp", agentId: "agent-alice-001"
+   c. 授权检查：
+      - Alice 是否有 GitHub 授权连接？→ 有（gh-alice-001, active）
+      - OAuth scope 是否覆盖 create_pr？→ 是（scope 包含 "repo"）
+      - 企业策略是否允许？→ 是（研发部员工，目标仓库在授权范围内）
+      - 是否需要审批？→ 否（创建 PR 是中等风险，按策略 ALLOW）
+   d. Credential Broker 获取 GitHub Token
+   e. Tool Adapter 调用 GitHub API：POST /repos/acme/backend-service/pulls
+   f. 返回 PR 创建结果
+   g. 记录审计事件
+7. Tool Gateway → Agent（工具调用结果）
+8. Agent → Control Plane → Web Console（展示给 Alice）
+```
+
+### 关键安全验证点
+
+| 步骤 | 验证内容 | 如果失败 |
+|------|---------|---------|
+| 5→6a | mTLS 证书验证 | 返回 DENY，原因：无法识别调用方 |
+| 6c | GitHub 授权连接检查 | 返回 DENY，原因：No GitHub authorization connected |
+| 6c | OAuth scope 检查 | 返回 DENY，原因：Action not in granted scopes |
+| 6c | 企业策略判定 | 返回 DENY 或 REQUIRE_APPROVAL |
+| 6d | 凭证获取 | 返回错误，原因：无法获取凭证 |
+| 6e | GitHub API 调用 | 返回错误，原因：API 调用失败（如分支不存在） |
+
+### 转岗后的行为变化
+
+如果 Alice 从研发部调到市场部后发起同样的请求：
+
+```
+步骤 6c：授权检查
+  - Alice 是否有 GitHub 授权连接？→ 有，但状态为 "disabled"（转岗时被禁用）
+  → 返回 DENY: "GitHub authorization is disabled due to department change"
+```
+
+Agent 告诉 Alice："我无法创建 GitHub PR，因为您的 GitHub 授权连接已因部门变更被禁用。"
+
+### 测试场景
+
+使用 `examples/07/tool-gateway/` 中的测试代码，可以验证以下场景：
+
+| 场景 | 测试用例 | 预期 |
+|------|---------|------|
+| 正常创建 PR | `test("allows create_pr with valid auth")` | ALLOW，返回 PR 信息 |
+| 无授权连接 | `test("denies without github connection")` | DENY |
+| 连接已过期 | `test("denies with expired connection")` | DENY |
+| Scope 不足 | `test("denies action outside scope")` | DENY |
+| 跨租户越权 | `test("denies cross-tenant access")` | DENY |
+| 高风险操作需审批 | `test("requires approval for delete_repo")` | REQUIRE_APPROVAL |
+| 参数篡改被拒绝 | `test("rejects execution if params changed after approval")` | DENY（参数哈希不匹配） |
+| 重试幂等性 | `test("prevents duplicate purchase orders")` | 只创建一个 |
+
 ## 已知限制与后续扩展
 
 当前参考实现的限制：
@@ -264,7 +347,7 @@ kubectl -n hermes-dev logs -l app=dex
 1. **内存 Session**：使用 express-session 内存存储，重启后 Session 丢失。生产环境应使用 Redis。
 2. **静态用户映射**：`devUsers` 是硬编码的。生产环境应从 PostgreSQL 查询。
 3. **无 Sandbox 创建**：本章只演示身份认证和授权。Agent Sandbox 的创建见第 5 章。
-4. **无 Tool Gateway**：工具调用的资源级授权在第 7 章展开。
+4. **Tool Gateway 为参考实现**：`examples/07/tool-gateway/` 是参考设计，尚未在真实第三方服务上验证。完整的网络策略、mTLS 双向认证、Sandbox 编排等组件在后续阶段逐步加入。
 
 ## 本章小结
 
@@ -275,8 +358,10 @@ kubectl -n hermes-dev logs -l app=dex
 3. 验证 `(issuer, subject)` 到内部用户的映射
 4. 验证跨租户访问拒绝
 5. 通过环境变量切换到 Google OIDC
+6. 完成企业系统工具接入端到端案例（GitHub PR 创建），展示从 Agent 请求到审计记录的完整链路
+7. 验证转岗后权限变更对工具调用的影响
 
-后续阶段将逐步加入 Sandbox 编排、网络策略、Tool Gateway、审批流程和可观测性。
+后续阶段将逐步加入 Sandbox 编排、网络策略、完整的 Tool Gateway 部署、审批流程和可观测性。
 
 ## 参考资料
 

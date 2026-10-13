@@ -130,8 +130,14 @@ flowchart TD
         EP[Egress Proxy\n出站代理 / 审计]
     end
 
+    subgraph AdapterLayer["MCP Server / Tool Adapter 层"]
+        AD1[MCP Server / Tool Adapter\n文档 / 知识库]
+        AD2[MCP Server / Tool Adapter\n财务 / ERP]
+        AD3[MCP Server / Tool Adapter\nIM / 日历]
+    end
+
     subgraph ExternalLayer["外部系统"]
-        GH[Enterprise Systems\nGitHub / Jira / Slack]
+        GH[Enterprise Systems\nGitHub / Jira / Slack / 财务 / ERP]
         EXT[External APIs\n经批准的外部服务]
     end
 
@@ -158,7 +164,12 @@ flowchart TD
     TG --> EP
     TG -. 审计事件 .-> AL
     CS -. 审计事件 .-> AL
-    CS --> GH
+    TG --> AD1
+    TG --> AD2
+    TG --> AD3
+    AD1 --> GH
+    AD2 --> GH
+    AD3 --> EXT
     EP --> EXT
     IAM -. 审计事件 .-> AL
     KMS -. 存储加密密钥 .-> ST
@@ -168,6 +179,7 @@ flowchart TD
 
     style ControlPlane fill:#e8f5e9
     style ToolLayer fill:#fff3e0
+    style AdapterLayer fill:#f3e5f5
     style ExternalLayer fill:#fce4ec
     style Shared fill:#e3f2fd
 ```
@@ -297,6 +309,26 @@ Tool Gateway 不直接持有企业系统的长期凭证。当授权检查通过�
 - **审计链路**：Credential Broker 记录每次凭证发放和使用的审计事件，与 Tool Gateway 的授权日志关联，形成完整的访问链路。
 
 这意味着：即使 Tool Gateway 被攻破，攻击者也无法直接获取企业系统的长期凭证；即使某个临时凭证泄露，其权限范围和时间窗口也受到严格限制。
+
+### 3.4.5 MCP Server / Tool Adapter 层
+
+在 Tool Gateway 与企业系统之间，存在一个**工具适配层**，负责将企业系统的 API、SDK 或集成接口封装为适合 Agent 调用的工具接口。
+
+这一层在架构中有两种物理形态：
+
+- **嵌入式**：作为 Tool Gateway 的内部模块，不增加额外的网络跳数。这是第一版的推荐方式。
+- **独立 MCP Server**：作为独立进程运行，通过 stdio 或 HTTP 与 Tool Gateway 通信。适合需要独立扩缩、安全团队独立审查的场景。
+
+无论采用哪种形态，这一层的职责是：
+
+- **参数校验**：确保 Agent 传来的参数符合业务规则（如采购申请的数量为正整数）。
+- **数据转换**：将企业系统的响应转换为 Agent 可理解的格式。
+- **错误处理**：将企业系统的错误码转换为工具调用结果。
+- **业务语义封装**：暴露具有明确业务含义的操作（如 `create_purchase_request`），而不是任意 HTTP 请求或 SQL 执行能力。
+
+**安全边界**：MCP Server / Tool Adapter 不执行授权检查。授权由 Tool Gateway 在调用 Adapter 之前完成。Adapter 信任 Tool Gateway 传来的调用请求已经通过了授权。
+
+关于企业工具接入方式的选择、五类典型系统的接入案例和失败场景，详见第 7 章。
 
 ### 3.5 Egress Proxy / Network Policy
 
@@ -615,22 +647,23 @@ Enterprise Systems                  外部 API / 互联网
 
 本章建立了企业级 Hermes Agent 平台的总体架构：
 
-1. **分层设计**：Web Console → Control Plane → Per-employee Agent Sandbox → Tool Gateway → Credential Broker / Egress Proxy → Enterprise Systems。
+1. **分层设计**：Web Console → Control Plane → Per-employee Agent Sandbox → Tool Gateway → MCP Server / Tool Adapter → Enterprise Systems。
 2. **一人一 Agent**：每位员工绑定一个长期存在的 Personal Agent Identity，身份不因 Pod 重建而改变，随时间积累 Memory、Skills 和 Sessions。
 3. **Identity & Authorization Manager**：作为 Control Plane 的子组件，负责员工到 Agent 的身份映射、权限计算、策略绑定，以及在组织关系变更时触发权限重新计算。
 4. **Credential Store / Credential Broker**：Tool Gateway 不直接持有长期凭证，而是通过 Credential Broker 获取临时凭证访问外部系统，实现授权与凭证持有的分离。
-5. **Audit Log**：独立审计存储接收来自 Tool Gateway、Control Plane 和 Credential Store 的审计事件，形成完整的访问链路。
-6. **持久化存储加密**：每位员工的 PVC 默认启用存储后端透明静态加密，由 KMS 管理密钥。
-7. **网络出站双保险**：Egress Proxy 做应用层转发和审计，NetworkPolicy 做网络层强制。
-8. **信任边界清晰**：每一层都独立验证身份和权限，不信任上游传来的身份声明。
-9. **身份与授权生命周期**：员工入职时创建 Agent 并授予初始权限，调岗时重新计算权限并回收旧凭证，离职时停用 Agent 并按保留策略处理数据。
+5. **MCP Server / Tool Adapter 层**：将企业系统的 API 封装为具有业务语义的工具接口，不执行授权检查。嵌入式或独立 MCP Server 两种部署方式。
+6. **Audit Log**：独立审计存储接收来自 Tool Gateway、Control Plane 和 Credential Store 的审计事件，形成完整的访问链路。
+7. **持久化存储加密**：每位员工的 PVC 默认启用存储后端透明静态加密，由 KMS 管理密钥。
+8. **网络出站双保险**：Egress Proxy 做应用层转发和审计，NetworkPolicy 做网络层强制。
+9. **信任边界清晰**：每一层都独立验证身份和权限，不信任上游传来的身份声明。
+10. **身份与授权生命周期**：员工入职时创建 Agent 并授予初始权限，调岗时重新计算权限并回收旧凭证，离职时停用 Agent 并按保留策略处理数据。
 
 后续章节将基于这个架构展开：
 
 - **第 4 章**：实现 OIDC 身份认证与员工到 Sandbox 的身份映射
 - **第 5 章**：在 Kubernetes 中为每位员工构建隔离的 Agent Sandbox，包括加密持久化存储
 - **第 6 章**：使用 Cilium 控制 Agent 的网络出站访问
-- **第 7 章**：构建 Tool Gateway，实施资源级授权
+- **第 7 章**：构建 Tool Gateway，实施资源级授权，含企业工具接入决策指南和五类系统接入案例
 - **第 8 章**：KMS 密钥管理、凭证访问控制和最小权限设计
 
 ## 参考资料

@@ -12,12 +12,28 @@
 - [ ] Alice 和 Bob 的 Agent 拥有各自独立的加密 PVC
 - [ ] 从 Bob 的 Pod 无法访问 Alice 的 Namespace 中的任何服务
 - [ ] Alice 和 Bob 的工作目录和 Memory 存储相互隔离
+- [ ] 每位员工绑定一个稳定的 Agent 身份（`agentId`），不因 Pod 重建而改变
 
 ### 身份认证与授权
 
 - [ ] OIDC Token 在服务端完整验证（签名、Issuer、Audience、Nonce、有效期）
 - [ ] 无法通过修改参数伪造身份或扩大工具权限
 - [ ] 员工身份到 Agent Sandbox 的映射由服务端维护，不信任 Agent 的自报身份
+- [ ] 员工与部门、角色关联，用于 Tool Gateway 授权策略
+
+### 个人 Agent 绑定
+
+- [ ] 员工登录后自动分配或恢复对应的 Agent 身份
+- [ ] Agent 身份在 Pod 重建后保持不变
+- [ ] 多个并发 Session 共享同一个 Agent 身份
+
+### 委托授权（外部服务）
+
+- [ ] 员工可以主动连接 GitHub 等第三方服务（OAuth 流程）
+- [ ] OAuth Token 不暴露在 Agent 环境、日志、Memory 或 Prompt 中
+- [ ] Tool Gateway 执行时授权检查，不因 OAuth 存在就放行所有操作
+- [ ] 已撤销的 OAuth 连接不能继续用于新的工具调用
+- [ ] 高风险操作（如删除仓库）即使有 OAuth 授权也需要审批
 
 ### 网络策略
 
@@ -73,6 +89,16 @@
 - [ ] 离职员工的数据按保留策略处理（保留或销毁）
 - [ ] 保留期结束后，PVC 和底层加密卷被销毁
 - [ ] 审计日志归档到加密长期存储
+
+### 员工转岗
+
+- [ ] 从可信 HR 系统接收组织关系变更
+- [ ] 保留原 Agent 身份，重新计算权限
+- [ ] 不再允许的部门级工具调用被阻断
+- [ ] 旧部门的外部授权连接被禁用或撤销
+- [ ] Memory 和 Skills 中的部门敏感信息被评估和处理
+- [ ] 所有变更生成可追踪的审计记录
+- [ ] 第三方撤销失败时有重试和告警机制
 
 ### 平台运维
 
@@ -140,6 +166,34 @@
 | T6.2 | 尝试以该员工身份登录 | 身份映射已撤销 |
 | T6.3 | 等待保留期结束后 | PVC 被删除 |
 | T6.4 | 通过云平台 API 验证 EBS 卷已销毁 | 卷不存在 |
+
+### T7：委托授权验证
+
+| 测试 | 步骤 | 预期结果 |
+|------|------|----------|
+| T7.1 | Alice 连接 GitHub OAuth | 授权连接状态为 `active` |
+| T7.2 | Alice 的 Agent 调用允许的 GitHub 操作 | 通过授权检查 |
+| T7.3 | Alice 的 Agent 调用未授权的 GitHub 操作 | 被拒绝 |
+| T7.4 | Alice 断开 GitHub 连接 | 新工具调用被拒绝 |
+| T7.5 | Bob 尝试访问 Alice 的授权连接 | 跨用户拒绝 |
+
+### T8：转岗流程验证
+
+| 测试 | 步骤 | 预期结果 |
+|------|------|----------|
+| T8.1 | Alice 从研发部调到市场部 | 部门更新，Agent 身份保留 |
+| T8.2 | Alice 的 Agent 尝试使用 GitHub 工具 | 被拒绝（非研发部） |
+| T8.3 | 检查 Alice 的 GitHub OAuth 连接 | 状态为 `disabled` |
+| T8.4 | Alice 尝试访问旧部门资源 | 被拒绝 |
+| T8.5 | 检查审计日志 | 包含 ORGANIZATION_CHANGED、PERMISSION_RECALCULATED、EXTERNAL_AUTH_DISABLED 事件 |
+
+### T9：Memory 与 Skills 不等于权限
+
+| 测试 | 步骤 | 预期结果 |
+|------|------|----------|
+| T9.1 | 转岗后 Memory 中仍有旧仓库 URL | 工具调用仍被拒绝 |
+| T9.2 | Skill 中定义了 `delete_repo` 步骤 | 高风险操作触发审批 |
+| T9.3 | 检查日志和审计事件 | 不包含 Token 值 |
 
 ## 已知风险与剩余风险说明
 

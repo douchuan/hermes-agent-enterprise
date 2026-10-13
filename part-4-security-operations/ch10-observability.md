@@ -35,13 +35,18 @@ Agent 不同：
 ```
 correlation_id: "req-abc-123"          ← 一次用户请求的唯一 ID
 ├── employee_id: "alice"
+├── agent_id: "agent-alice-001"
 ├── tenant_id: "acme-corp"
 ├── session_id: "sess-xyz-456"
 ├── model_call_id: "mc-001", "mc-002"
 ├── tool_call_id: "tc-001"
 ├── policy_decision_id: "pd-001"
-└── approval_id: "apr-001"             ← 如果触发了审批
+├── approval_id: "apr-001"             ← 如果触发了审批
+├── external_auth_connection_id: "gh-alice-001"  ← 外部授权连接
+└── org_change_event_id: "org-chg-001"  ← 组织关系变更事件
 ```
+
+**审计事件中不得记录**：Token 值、Refresh Token、Client Secret、Access Token 或其他任何秘密值。只记录连接 ID、授权范围（scopes）、状态变化和时间戳。
 
 ### Trace 示例：一次完整的 Agent 执行
 
@@ -99,6 +104,61 @@ Trace: req-abc-123
 └─ Audit: kms_key_policy_change   [KMS 密钥策略变更]
     └─ 记录谁在什么时候修改了密钥策略
 ```
+
+### 组织关系变更与权限回收审计
+
+当员工从研发部调到市场部时，平台需要记录完整的变更和回收链路：
+
+```
+Audit: ORGANIZATION_CHANGED
+├── employee_id: "alice"
+├── agent_id: "agent-alice-001"
+├── tenant_id: "acme-corp"
+├── old_department: "engineering"
+├── new_department: "marketing"
+├── initiated_by: "hr-system"
+├── timestamp: "2025-01-15T10:30:00Z"
+└── status: "success"
+
+Audit: PERMISSION_RECALCULATED
+├── employee_id: "alice"
+├── agent_id: "agent-alice-001"
+├── revoked_permissions: ["github:backend-repo:write", "jira:eng-project:read"]
+├── granted_permissions: ["slack:marketing-channel:write"]
+├── initiated_by: "control-plane"
+├── timestamp: "2025-01-15T10:30:05Z"
+└── status: "success"
+
+Audit: EXTERNAL_AUTH_DISABLED
+├── employee_id: "alice"
+├── agent_id: "agent-alice-001"
+├── external_auth_connection_id: "gh-alice-backend"
+├── external_auth_provider: "github"
+├── reason: "department_change: engineering → marketing"
+├── initiated_by: "control-plane"
+├── timestamp: "2025-01-15T10:30:06Z"
+├── status: "success"          ← 平台侧立即生效
+└── third_party_revocation: "pending"  ← 第三方可能有延迟
+
+Audit: EXTERNAL_AUTH_REVOKED
+├── ...同上...
+├── third_party_revocation: "success"  ← 第三方撤销完成
+└── timestamp: "2025-01-15T10:30:30Z"
+
+Audit: EXTERNAL_AUTH_REVOKED
+├── ...同上...
+├── third_party_revocation: "failed"
+├── failure_reason: "GitHub API rate limit"
+├── retry_count: 3
+└── status: "retry_pending"    ← 需要持续重试和告警
+```
+
+**关键可观测性要求**：
+
+- **平台侧禁用**和**第三方撤销**是两个独立事件，不能混为一谈。
+- 第三方撤销失败必须有 `retry_pending` 状态、重试计数和告警。
+- 审计记录必须包含 `agent_id`、`external_auth_connection_id`、`old_department`、`new_department` 等字段，以便追溯完整的变更链路。
+- 不得在审计记录中记录 Token 值或任何秘密值。
 
 ## 实现步骤
 
@@ -246,14 +306,47 @@ interface StorageAuditEvent {
     | "KMS_KEY_DELETED"
     | "CREDENTIAL_ROTATED"
     | "CREDENTIAL_REVOKED"
-    | "EMPLOYEE_OFFBOARDED";
+    | "EMPLOYEE_OFFBOARDED"
+    | "ORGANIZATION_CHANGED"
+    | "PERMISSION_RECALCULATED"
+    | "EXTERNAL_AUTH_CONNECTED"
+    | "EXTERNAL_AUTH_REVOKED"
+    | "EXTERNAL_AUTH_EXPIRED"
+    | "EXTERNAL_AUTH_DISABLED"
+    | "HIGH_RISK_OPERATION_APPROVED"
+    | "HIGH_RISK_OPERATION_DENIED"
+    | "TOOL_CALL_DENIED"
+    | "TOOL_CALL_APPROVAL_PENDING"
+    | "AGENT_REBUILT"
+    | "SESSION_STARTED";
   employeeId?: string;
+  agentId?: string;
+  tenantId?: string;
   namespace?: string;
   pvcName?: string;
   snapshotName?: string;
   kmsKeyId?: string;
+  // 外部授权相关
+  externalAuthConnectionId?: string;
+  externalAuthProvider?: string;
+  // 工具调用相关
+  toolName?: string;
+  action?: string;
+  resource?: string;
+  // 审批相关
+  approvalId?: string;
+  approvalResult?: "approved" | "denied";
+  // 组织变更相关
+  oldDepartment?: string;
+  newDepartment?: string;
+  oldRole?: string;
+  newRole?: string;
+  // 通用字段
   initiatedBy: string;
   timestamp: string;
+  status?: "success" | "failed" | "retry_pending";
+  failureReason?: string;
+  retryCount?: number;
   details?: Record<string, unknown>;
 }
 

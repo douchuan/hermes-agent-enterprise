@@ -40,39 +40,136 @@ Employee (Browser / CLI)
 +-------------------+
     |
     v
-+-------------------+
-|   Control Plane   | 身份映射、租户策略、Sandbox 编排、生命周期管理
-+-------------------+
++-----------------------------------------------------------+
+|   Control Plane                                           |
+|   +-----------------------------------------------------+ |
+|   | Identity & Authorization Manager                    | |
+|   |  - Employee → Agent 身份映射                         | |
+|   |  - 权限计算与策略绑定                                | |
+|   |  - 组织关系变更触发权限重新计算                       | |
+|   +-----------------------------------------------------+ |
+|   Sandbox 编排  |  生命周期管理  |  会话路由                 |
++-----------------------------------------------------------+
     |
-    +---------------------------------------------------------------+
-    |                                                               |
-    v                                                               v
-+-------------------+                                     +-------------------+
-| Alice Sandbox     |                                     | Bob Sandbox       |
-| (Hermes Agent)    |                                     | (Hermes Agent)    |
-| + Encrypted PVC   |                                     | + Encrypted PVC   |
-+-------------------+                                     +-------------------+
-    |                                                               |
-    +-------------------------+-------------------------------------+
-                              |
-                              v
-                +-------------------------------+
-                |   Tool Gateway / Egress Proxy |
-                |   调用方验证、授权、配额、审计 |
-                +-------------------------------+
-                              |
-                              v
-                +-------------------------------+
-                |   Enterprise Systems          |
-                |   GitHub / Jira / Slack / ... |
-                +-------------------------------+
+    |  每位员工绑定一个长期存在的 Personal Hermes Agent
+    +-----------------------------------------------------------------+
+    |                                                                 |
+    v                                                                 v
++-----------------------------------+                     +-----------------------------------+
+| Alice Personal Hermes Agent       |                     | Bob Personal Hermes Agent         |
+|  Agent Identity: agent/alice-001   |                     |  Agent Identity: agent/bob-001     |
+|  + Memory / Skills / Sessions     |                     |  + Memory / Skills / Sessions      |
+|  + Workspace (加密 PVC)            |                     |  + Workspace (加密 PVC)             |
+|  + 多 Session 并发                 |                     |  + 多 Session 并发                  |
++-----------------------------------+                     +-----------------------------------+
+    |                                                                 |
+    +--------------------------------+--------------------------------+
+                                     |
+                                     v
+                   +-----------------------------------+
+                   |   Tool Gateway                    |
+                   |   调用方验证、员工-租户绑定、       |
+                   |   资源级授权、配额、审批判定         |
+                   +-----------------------------------+
+                                     |
+                    +----------------+----------------+
+                    |                                 |
+                    v                                 v
+     +----------------------------+      +----------------------------+
+     | Credential Store /         |      | Egress Proxy               |
+     | Credential Broker          |      | 出站流量代理与审计           |
+     | 临时凭证、资源级 Token      |      | (配合 NetworkPolicy)        |
+     +----------------------------+      +----------------------------+
+             |                                 |
+             v                                 v
+     +----------------------------+      +----------------------------+
+     | Enterprise Systems         |      | External APIs / Internet   |
+     | GitHub / Jira / Slack / ...|      | (经批准的域名)              |
+     +----------------------------+      +----------------------------+
 
     [Shared Services]
-    +------------------+  +------------------+  +------------------+
-    |   KMS            |  |   Vault /        |  |   Storage        |
-    |   密钥管理        |  |   Secret Manager |  |   后端(EBS/Ceph) |
-    |   透明加密密钥    |  |   工具调用凭证    |  |   静态加密       |
-    +------------------+  +------------------+  +------------------+
+    +------------------+  +------------------+  +------------------+  +------------------+
+    |   KMS            |  |   Vault /        |  |   Storage        |  |   Audit Log      |
+    |   密钥管理        |  |   Secret Manager |  |   后端(EBS/Ceph) |  |   独立审计存储    |
+    |   透明加密密钥    |  |   工具调用凭证    |  |   静态加密       |  |   接收多方事件    |
+    +------------------+  +------------------+  +------------------+  +------------------+
+          ^                      ^                      ^                     ^
+          |                      |                      |                     |
+          +-- 存储加密密钥 --+    +-- 凭证注入 --+        +-- 卷加密 --+        +-- Tool Gateway /
+                                                                          Control Plane /
+                                                                          Credential Store
+```
+
+**完整组件交互流程图（Mermaid）**：
+
+```mermaid
+flowchart TD
+    subgraph EmployeeLayer["员工层"]
+        E[Employee\n浏览器 / CLI]
+    end
+
+    subgraph WebLayer["Web Console"]
+        WC[Web Console\n会话管理 / 审批 UI]
+    end
+
+    subgraph ControlPlane["Control Plane"]
+        IAM[Identity & Authorization Manager\n身份映射 / 权限计算 / 策略绑定]
+        SB[Sandbox 编排]
+        LM[生命周期管理]
+        SR[会话路由]
+    end
+
+    subgraph AgentLayer["Personal Agent 层"]
+        A1[Alice Agent Sandbox\nHermes Agent + Memory + Skills + Sessions + PVC]
+        A2[Bob Agent Sandbox\nHermes Agent + Memory + Skills + Sessions + PVC]
+    end
+
+    subgraph ToolLayer["工具与网络层"]
+        TG[Tool Gateway\n调用方验证 / 授权 / 配额 / 审批]
+        CS[Credential Store / Credential Broker\n临时凭证 / 资源级 Token]
+        EP[Egress Proxy\n出站代理 / 审计]
+    end
+
+    subgraph ExternalLayer["外部系统"]
+        GH[Enterprise Systems\nGitHub / Jira / Slack]
+        EXT[External APIs\n经批准的外部服务]
+    end
+
+    subgraph Shared["Shared Services"]
+        KMS[KMS\n密钥管理]
+        VT[Vault / Secret Manager]
+        ST[Storage Backend\n透明静态加密]
+        AL[Audit Log\n独立审计存储]
+    end
+
+    E --> WC
+    WC --> IAM
+    IAM --> SB
+    IAM --> LM
+    IAM --> SR
+    SR --> A1
+    SR --> A2
+    SB --> A1
+    SB --> A2
+    LM -. 组织变更触发权限重算 .-> IAM
+    A1 --> TG
+    A2 --> TG
+    TG --> CS
+    TG --> EP
+    TG -. 审计事件 .-> AL
+    CS -. 审计事件 .-> AL
+    CS --> GH
+    EP --> EXT
+    IAM -. 审计事件 .-> AL
+    KMS -. 存储加密密钥 .-> ST
+    VT -. 凭证注入 .-> CS
+    ST -. 卷加密 .-> A1
+    ST -. 卷加密 .-> A2
+
+    style ControlPlane fill:#e8f5e9
+    style ToolLayer fill:#fff3e0
+    style ExternalLayer fill:#fce4ec
+    style Shared fill:#e3f2fd
 ```
 
 ### 3.1 Web Console
@@ -141,6 +238,26 @@ Sandbox 的技术实现（第 5 章详细展开）：
 
 **Sandbox 不直接访问企业系统**。所有工具调用必须通过 Tool Gateway。
 
+#### 一人一 Agent：逻辑绑定与身份稳定性
+
+架构中存在一个核心的逻辑关系：**每位员工绑定一个长期存在的 Personal Agent Identity**。这个绑定由 Control Plane 的 Identity & Authorization Manager 维护，具有以下特征：
+
+- **一对一绑定**：一名员工对应一个 Agent Identity，不会因任务不同而切换 Agent。Agent 通过选择合适的 Skills 和工具来处理不同类型的任务。
+- **身份稳定**：Agent Identity 是稳定的、长期的标识符（如 `agent/alice-001`），不因 Pod 重启、重建或镜像升级而改变。Pod 只是 Agent 的运行时实例（Runtime Instance），销毁后新建的 Pod 仍加载同一个 Agent Identity。
+- **状态积累**：Agent 随时间积累 Memory、Skills、Sessions 和 Workspace 数据。这些状态持久化在加密 PVC 中，与 Agent Identity 绑定，而非与某个具体的 Pod 绑定。
+- **多 Session 并发**：同一员工的 Agent 可以同时承载多个对话 Session（如同时处理代码审查和文档编写）。这些 Session 共享同一个 Agent Identity、Memory 和工具权限，但需要适当的并发控制以避免资源冲突和状态不一致。
+
+在概念上需要区分四个层次：
+
+| 层次 | 说明 | 生命周期 |
+|------|------|----------|
+| Employee Identity | 员工在企业 IdP 中的身份 `(issuer, subject)` | 员工在职期间 |
+| Agent Identity | 平台分配的长期 Agent 标识（如 `agent/alice-001`） | 员工在职 + 离职保留期 |
+| Runtime Instance | 承载 Agent 的 Kubernetes Pod | 分钟到数天（可重建） |
+| Persistent State | Memory、Skills、Sessions、Workspace | 与 Agent Identity 同生命周期 |
+
+这种设计确保了：员工的 Agent 不会因为一次 Pod 重建而丢失 Memory；组织关系变更时，Control Plane 只需更新 Agent Identity 对应的权限策略，而不需要重新创建整个运行环境。
+
 ### 3.4 Tool Gateway
 
 **职责**：统一承接 Agent 的企业工具调用，实施调用方验证、授权、配额和审计。
@@ -170,6 +287,16 @@ Agent Sandbox                    Tool Gateway                     Enterprise Sys
 ```
 
 Tool Gateway 的实现基于 MCP（Model Context Protocol）Server，但 MCP 只是工具连接协议，不是授权边界。授权必须由 Tool Gateway 在服务端执行（见第 7 章）。
+
+#### 外部服务授权委托
+
+Tool Gateway 不直接持有企业系统的长期凭证。当授权检查通过后，Tool Gateway 向 **Credential Store / Credential Broker** 请求临时凭证或资源级 Token，由 Credential Broker 代表 Tool Gateway 访问外部系统。这种设计实现了授权与凭证持有的分离：
+
+- **Credential Broker**：根据 Tool Gateway 传入的 Agent Identity、员工身份、目标资源和操作类型，生成或获取最小权限的临时凭证（如 GitHub 的 Fine-grained PAT、短期 OAuth Token）。
+- **权限回收**：临时凭证具有明确的过期时间，操作完成后即失效。员工权限变更时，Control Plane 通知 Credential Broker 撤销相关凭证，无需等待过期。
+- **审计链路**：Credential Broker 记录每次凭证发放和使用的审计事件，与 Tool Gateway 的授权日志关联，形成完整的访问链路。
+
+这意味着：即使 Tool Gateway 被攻破，攻击者也无法直接获取企业系统的长期凭证；即使某个临时凭证泄露，其权限范围和时间窗口也受到严格限制。
 
 ### 3.5 Egress Proxy / Network Policy
 
@@ -302,6 +429,78 @@ Enterprise Systems                  外部 API / 互联网
 
 审批必须绑定具体操作、目标和参数，防止"批准了一个操作，实际执行了另一个"。
 
+## 身份与授权生命周期
+
+平台中员工与 Agent 的关系不是一次性建立的，而是贯穿员工入职、调岗、离职的完整生命周期。Control Plane 的 Identity & Authorization Manager 负责在组织关系变化时触发权限的重新计算和应用。
+
+### 员工入职：Agent 创建与初始授权
+
+当新员工加入企业时：
+
+```
+1. HR 系统 / 管理员在 IdP 中创建员工身份
+2. 员工首次通过 OIDC 登录 Web Console
+3. Control Plane 验证 OIDC Token，识别为新用户
+4. Identity & Authorization Manager：
+   a. 创建平台内部用户记录，绑定 (issuer, subject)
+   b. 关联到租户，根据部门/角色加载初始策略
+   c. 分配 Agent Identity（如 agent/alice-001）
+5. Sandbox 编排器为该 Agent 创建运行环境：
+   - 独立 Namespace、Pod、加密 PVC
+   - 最小权限 ServiceAccount
+   - 网络策略（仅允许访问 Tool Gateway 和 Egress Proxy）
+6. Credential Broker 为该 Agent 初始化可用工具的凭证模板（非实际 Token，而是权限范围定义）
+7. 员工在 Console 中看到 Agent 界面，可以开始对话
+```
+
+此时 Agent 处于"初始状态"——Memory 为空、仅启用基础 Skills、工具权限按角色默认策略设定。随着员工使用，Agent 逐步积累 Memory 和定制 Skills。
+
+### 员工调岗：权限重新计算
+
+当员工从一个部门调到另一个部门（或角色发生变化）时：
+
+```
+1. HR 系统 / 管理员更新员工的部门或角色信息
+2. 变更事件 → Control Plane（通过 Webhook 或定时同步）
+3. Identity & Authorization Manager：
+   a. 检测组织关系变更
+   b. 重新计算该员工 Agent Identity 对应的权限策略
+   c. 撤销旧角色下的工具权限（如原部门的 GitHub Repository 访问权）
+   d. 授予新角色下的工具权限
+4. Credential Broker：
+   a. 回收已撤销权限对应的临时凭证
+   b. 生成新权限范围内的凭证模板
+5. Tool Gateway 收到策略更新，后续工具调用按新策略执行
+6. 审计日志记录：权限变更事件、撤销的操作、新增的权限
+```
+
+**关键点**：权限变更的是 Agent Identity 对应的策略，而不是重建 Sandbox。Agent 的 Memory、Skills 和会话历史保留不变，但能调用的工具和可访问的资源范围已更新。正在进行的对话可能在下次工具调用时收到权限不足的响应，这是预期行为——授权检查在每次工具调用时执行。
+
+### 员工离职：Agent 回收与数据处理
+
+当员工离开企业时：
+
+```
+1. HR 系统禁用或删除员工在 IdP 中的身份
+2. IdP 不再为该身份发放有效 Token
+3. Control Plane 收到离职事件（通过 Webhook 或定时同步）
+4. Identity & Authorization Manager：
+   a. 标记该员工对应的 Agent Identity 为"已停用"
+   b. 撤销所有工具权限
+5. Credential Broker 回收该 Agent 的所有临时凭证
+6. Sandbox 编排器：
+   a. 停止 Agent Pod（不再接受新请求）
+   b. 保留加密 PVC（按数据保留策略，如 90 天）
+   c. 禁止新的 Session 创建
+7. 审计日志记录：停用事件、凭证回收、PVC 保留期限
+```
+
+**数据保留策略**：
+
+- PVC 中的 Agent 数据（Memory、Sessions、Workspace）在保留期内保持加密存储，可按合规要求导出或彻底删除。
+- 保留期结束后，Control Plane 触发 PVC 删除，并确认底层存储和备份中的对应数据已清除。
+- 审计日志中的历史记录按独立的保留策略管理，不因员工离职而删除——审计日志是企业的合规资产。
+
 ## 信任边界
 
 架构中的信任边界是安全设计的核心。以下是关键边界：
@@ -416,13 +615,15 @@ Enterprise Systems                  外部 API / 互联网
 
 本章建立了企业级 Hermes Agent 平台的总体架构：
 
-1. **分层设计**：Web Console → Control Plane → Per-employee Agent Sandbox → Tool Gateway / Egress Proxy → Enterprise Systems。
-2. **每位员工一个 Sandbox**：确保 Memory、文件、会话和工具调用的隔离。
-3. **持久化存储加密**：每位员工的 PVC 默认启用存储后端透明静态加密，由 KMS 管理密钥。
-4. **Tool Gateway 统一工具调用**：Agent 不直接接触企业凭证，所有调用经过服务端授权。
-5. **网络出站双保险**：Egress Proxy 做应用层转发和审计，NetworkPolicy 做网络层强制。
-6. **信任边界清晰**：每一层都独立验证身份和权限，不信任上游传来的身份声明。
-7. **KMS 与存储后端协同**：KMS 管理密钥，存储后端透明加解密，Hermes Agent 无需感知。
+1. **分层设计**：Web Console → Control Plane → Per-employee Agent Sandbox → Tool Gateway → Credential Broker / Egress Proxy → Enterprise Systems。
+2. **一人一 Agent**：每位员工绑定一个长期存在的 Personal Agent Identity，身份不因 Pod 重建而改变，随时间积累 Memory、Skills 和 Sessions。
+3. **Identity & Authorization Manager**：作为 Control Plane 的子组件，负责员工到 Agent 的身份映射、权限计算、策略绑定，以及在组织关系变更时触发权限重新计算。
+4. **Credential Store / Credential Broker**：Tool Gateway 不直接持有长期凭证，而是通过 Credential Broker 获取临时凭证访问外部系统，实现授权与凭证持有的分离。
+5. **Audit Log**：独立审计存储接收来自 Tool Gateway、Control Plane 和 Credential Store 的审计事件，形成完整的访问链路。
+6. **持久化存储加密**：每位员工的 PVC 默认启用存储后端透明静态加密，由 KMS 管理密钥。
+7. **网络出站双保险**：Egress Proxy 做应用层转发和审计，NetworkPolicy 做网络层强制。
+8. **信任边界清晰**：每一层都独立验证身份和权限，不信任上游传来的身份声明。
+9. **身份与授权生命周期**：员工入职时创建 Agent 并授予初始权限，调岗时重新计算权限并回收旧凭证，离职时停用 Agent 并按保留策略处理数据。
 
 后续章节将基于这个架构展开：
 

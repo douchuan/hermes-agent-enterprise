@@ -33,12 +33,13 @@
 目标系统是一个多租户企业 Agent 平台，采用以下逻辑分层：
 
 1. **Web Console**：员工入口、登录、会话与审批界面。
-2. **Control Plane**：租户和员工身份映射、策略配置、Sandbox 编排、生命周期管理。
-3. **Per-employee Agent Sandbox**：每位员工独立运行 Hermes Agent，使用独立工作目录、配置、Memory、会话和持久化数据。
+2. **Control Plane**：包含 Identity & Authorization Manager（身份映射、权限计算、组织变更触发权限重算）、策略配置、Sandbox 编排、生命周期管理。
+3. **Per-employee Agent Sandbox**：每位员工绑定一个长期存在的 Personal Hermes Agent Identity，独立运行环境、Memory、Skills、会话和持久化数据。Agent 身份不因 Pod 重建而改变。
 4. **Tool Gateway**：统一承接企业工具调用，实施调用方验证、员工与租户绑定、资源级授权、配额、审批和审计。
-5. **Egress Proxy / Network Policy**：约束 Agent 的网络出站路径；代理负责其能力范围内的转发与审计，网络策略负责强制执行可达性边界。
-6. **Shared Services**：模型服务、知识检索、凭证管理、元数据存储和可观测性等服务，按需求独立部署。
-7. **Enterprise Systems**：GitHub、Jira、Slack、Confluence 和内部 API 等。
+5. **Credential Store / Credential Broker**：为 Tool Gateway 提供临时凭证和资源级 Token，实现授权与凭证持有的分离。
+6. **Egress Proxy / Network Policy**：约束 Agent 的网络出站路径；代理负责其能力范围内的转发与审计，网络策略负责强制执行可达性边界。
+7. **Shared Services**：模型服务、知识检索、凭证管理、元数据存储、KMS 和可观测性等服务，按需求独立部署。
+8. **Enterprise Systems**：GitHub、Jira、Slack、Confluence 和内部 API 等。
 
 逻辑架构示意：
 
@@ -49,22 +50,31 @@ Employee
 Web Console
    |
    v
-Control Plane
+Control Plane (含 Identity & Authorization Manager)
    |
    +---------------------------+
    |                           |
    v                           v
 Alice Agent Sandbox        Bob Agent Sandbox
+(Personal Agent)           (Personal Agent)
    |                           |
    +-------------+-------------+
                  |
                  v
-        Tool Gateway / Egress Proxy
-        Policy / Approval / Audit
+        Tool Gateway
+        (授权 / 审批 / 配额)
                  |
-                 v
-        Enterprise Systems
+    +------------+------------+
+    |                         |
+    v                         v
+Credential Broker       Egress Proxy
+(临时凭证)              (出站代理 / 审计)
+    |                         |
+    v                         v
+Enterprise Systems       External APIs
 ```
+
+**审计**：Tool Gateway、Control Plane、Credential Broker 各自发送审计事件到独立的 Audit Log 存储。
 
 这是逻辑结构，不代表所有请求必须经过同一个组件。正文必须明确模型访问、企业工具调用、知识检索、网络出站和审计数据的实际路径。
 

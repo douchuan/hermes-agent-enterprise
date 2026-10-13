@@ -9,6 +9,10 @@ declare module "express-session" {
     email: string;
     name: string;
     tenantIds: string[];
+    // 组织信息与 Agent 身份
+    department?: string;
+    role?: string;
+    agentId?: string;
   }
 }
 
@@ -17,4 +21,7 @@ export interface SessionData {
   email: string;
   name: string;
   tenantIds: string[];
+  department?: string;
+  role?: string;
+  agentId?: string;
 }

@@ -69,10 +69,16 @@ export function createAuthRoutes(config: AppConfig): Router {
       session.email = user.email;
       session.name = user.name;
       session.tenantIds = user.tenantIds;
+      // 扩展字段：部门、角色、Agent 身份
+      (session as any).department = user.department;
+      (session as any).role = user.role;
+      (session as any).agentId = user.agentId;
       // 不将 ID Token 存入 session，避免敏感凭证泄露到浏览器
 
       console.log(
-        `[auth] Login success: ${user.name} (${user.email}), tenants: ${user.tenantIds.join(", ")}`
+        `[auth] Login success: ${user.name} (${user.email}), ` +
+          `department=${user.department}, agentId=${user.agentId}, ` +
+          `tenants: ${user.tenantIds.join(", ")}`
       );
 
       res.redirect("/");

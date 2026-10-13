@@ -57,9 +57,38 @@
 
 本书采用确定性的隔离策略：**每位员工拥有独立的 Namespace、独立的 Pod、独立的加密持久化存储。**
 
+但需要明确一个关键区分：**员工的个人 Agent 身份不依赖于某一个永久运行的 Pod。**
+
+```
+Agent Identity: agent-alice-001     ← 稳定的 Agent 身份（长期存在）
+    │
+    ├── Runtime Instance:            ← 当前运行的 Pod（可重启、重建）
+    │   namespace: hermes-agent-alice
+    │   pod: agent
+    │
+    ├── Persistent State:            ← 持久化状态（Pod 重建后保留）
+    │   PVC: agent-data (encrypted)
+    │   ├── /home/hermes/workspace
+    │   ├── /home/hermes/memory
+    │   └── /home/hermes/sessions
+    │
+    └── User Binding:                ← 服务端维护的员工→Agent 映射
+        employee_id: alice
+        agent_id: agent-alice-001
+        status: active
+```
+
+**员工与个人 Agent 的逻辑一对一关系**：
+
+- 每位员工绑定一个长期稳定的个人 Hermes Agent 身份。
+- 这个 Agent 持续积累和管理 Memory、Skills、Sessions 和 Workspace。
+- 员工不需要针对不同任务选择不同的 Agent——一个 Agent 根据任务选择合适的 Skill 和工具。
+- 运行实例（Pod）可以因故障、更新或资源调度而重建，但 Agent 身份和持久化状态保留。
+- 多个并发任务可以共享同一个 Agent 身份，但需根据 Hermes 的会话和文件访问机制实施必要的并发控制，不要假设同一 Agent 的并发访问天然安全。
+
 ```
 hermes-agent-alice/          ← Namespace
-  pod/agent                  ← Pod（单实例）
+  pod/agent                  ← Pod（单实例，可重建）
   pvc/agent-data             ← 加密 PersistentVolume（工作目录 + Memory）
   serviceaccount/agent       ← 最小权限身份
   networkpolicy/default-deny ← 网络策略（第 6 章）
@@ -413,6 +442,61 @@ Control Plane 在员工首次登录或管理员激活时创建 Sandbox（见 5.1
 ### 暂停
 
 当员工长期不使用 Agent（例如休假），将 Deployment replicas 设为 0。PVC 保留，数据不丢失。恢复时只需将 replicas 设为 1。
+
+### 员工转岗：Sandbox 处理
+
+当员工从一个部门调到另一个部门（如 Alice 从研发部调到市场部），Sandbox 本身**通常不需要重建**。
+
+**默认策略：保留原 Agent 身份，重新评估权限。**
+
+```
+Control Plane 收到组织关系变更事件
+    │
+    ├─ 更新员工部门、角色、团队
+    │
+    ├─ 立即使平台侧不再允许的授权失效
+    │   └─ 更新 Tool Gateway 策略缓存
+    │
+    ├─ 触发外部授权连接重算（第 7 章）
+    │   ├─ 研发部专属 GitHub 团队 → 移除
+    │   ├─ 不再适用的 OAuth 连接 → 禁用
+    │   └─ 第三方团队成员关系 → 撤销
+    │
+    ├─ 评估 Memory、Skills、Workspace 中的敏感数据
+    │   ├─ 部门级敏感信息 → 根据保留策略处理
+    │   └─ 个人非敏感信息 → 保留
+    │
+    ├─ 检查正在执行的任务
+    │   └─ 失去授权的任务 → 终止并通知员工
+    │
+    └─ 记录所有变更到审计日志（第 10 章）
+```
+
+**为什么不需要重建 Sandbox？**
+
+- Agent 的身份（`agentId`）是长期稳定的，不因部门变化而改变。
+- Memory 和 Skills 中可能包含对个人有用的非敏感信息，不应盲目删除。
+- 重建 Sandbox 的开销远大于权限重算。
+- PVC 加密和 Namespace 隔离保证了运行环境的独立性。
+
+**需要重建 Sandbox 的特殊情况**：
+
+- 员工身份主体发生变化（issuer/subject 变更）。
+- 原 Sandbox 的完整性或隔离边界受到影响（安全事件）。
+- 新旧岗位需要不同的安全等级或运行边界（如从普通员工调到安全审计岗）。
+- 无法可靠清理旧环境中的敏感凭证或状态。
+- 企业政策明确要求重新建立隔离环境。
+
+即使重建，也不能默认完整复制旧 Memory、Skills 和凭证。需要根据数据分类、来源、授权和保留规则决定迁移范围。
+
+**区分四个不同的决策**：
+
+| 决策 | 说明 | 默认行为 |
+|------|------|----------|
+| Agent 身份是否保持 | 员工对应的 Agent ID 是否保留 | 保留 |
+| Pod 是否重建 | 运行实例是否销毁重建 | 不重建 |
+| 持久化状态是否迁移 | Memory、Workspace 是否保留 | 保留，但评估敏感数据 |
+| 权限是否重新授予 | 工具调用权限、外部授权是否有效 | 重新评估 |
 
 ### 回收
 

@@ -247,6 +247,110 @@ span.setAttribute("github.status_code", response.status);
 
 第 10 章详细讨论了可观测性中的敏感数据处理。
 
+### 8.7 外部服务委托授权的凭证管理
+
+当员工通过 OAuth 委托 Agent 访问外部服务时（第 7 章），凭证管理有以下特殊要求：
+
+**凭证与员工、租户的绑定**：
+
+```typescript
+interface DelegatedCredential {
+  id: string;               // connection_id
+  employeeId: string;       // 属于哪个员工
+  tenantId: string;         // 属于哪个租户
+  provider: string;         // "github", "jira", "slack"
+  mode: "oauth" | "enterprise_app";
+  accessToken: string;      // 加密存储
+  refreshToken?: string;    // 加密存储（如 OAuth 支持刷新）
+  scopes: string[];         // 授权范围
+  expiresAt: Date;          // Token 过期时间
+  status: "active" | "expired" | "revoked" | "disabled";
+  // 审计字段
+  createdAt: Date;
+  revokedAt?: Date;
+  revokedBy?: string;       // 员工主动断开 / 平台禁用 / 安全事件
+  revokedReason?: string;
+}
+```
+
+**凭证不能进入 Agent 环境**：
+
+- OAuth Access Token 存储在 Credential Store（如 Vault 或云 Secret Manager），加密存储。
+- Tool Gateway 需要执行操作时，从 Credential Store 获取 Token，使用后释放。
+- Token 不注入 Agent Pod 的环境变量、ConfigMap 或任何 Agent 可访问的存储。
+- Token 不进入 Prompt、Memory、Skills 或任何可能被模型输出的上下文。
+
+**最小权限原则应用于每个委托连接**：
+
+- OAuth scope 应尽量缩小。例如 `repo` scope 授予仓库读写权限，`public_repo` 只授予公共仓库权限。
+- 企业策略可以进一步限制：即使员工授权了 `delete_repo` scope，平台策略可以拒绝该操作。
+- 企业应用身份（如 GitHub App）的权限由 IT 管理员配置，不依赖员工个人授权。
+
+**Token 安全存储**：
+
+```
+┌─────────────────────────────────────────┐
+│  Credential Store                       │
+│  (Vault / AWS Secrets Manager)          │
+│                                         │
+│  Path: hermes/oauth/alice/github        │
+│  Value: { access_token: "gho_...",     │
+│           refresh_token: "...",         │
+│           scopes: ["repo"],             │
+│           expires_at: "2025-..." }      │
+│                                         │
+│  加密：KMS 密钥                         │
+│  访问：仅 Tool Gateway 的 Workload ID   │
+│  审计：每次读取有记录                    │
+└─────────────────────────────────────────┘
+         ▲
+         │ 按需获取，不持久持有
+         │
+┌────────┴────────────────────────────────┐
+│  Tool Gateway                           │
+│  - 启动时不预加载所有 Token              │
+│  - 需要时从 Credential Store 获取        │
+│  - 使用后不在内存中长期保留              │
+└─────────────────────────────────────────┘
+```
+
+### 8.8 员工转岗与离职时的凭证回收
+
+**转岗时的凭证处理**：
+
+当 Alice 从研发部调到市场部：
+
+1. **平台侧立即禁用**：Control Plane 将不再适用的授权连接标记为 `disabled`，Tool Gateway 拒绝使用这些凭证的新请求。
+2. **评估每个连接的适用性**：
+   - 研发部专属 GitHub 团队的凭证 → 不再需要，标记 `revoked`。
+   - 企业 GitHub App 的凭证 → 如果市场部也需要使用，保留但重新评估权限。
+   - 员工个人 GitHub OAuth 连接 → 由员工决定是否保持连接（企业策略可能要求断开）。
+3. **第三方撤销**：
+   - 调用 GitHub API 撤销不再需要的 Token（如支持）。
+   - 从 GitHub Team 中移除 Alice 的成员关系。
+   - **注意**：第三方撤销可能有延迟或 API 限制，平台侧禁用是即时生效的第一道防线。
+4. **清理运行环境中可能残留的凭证**：
+   - 确认 Agent Sandbox 中没有环境变量、配置文件或 Skill 定义包含旧凭证。
+   - Agent 不直接持有凭证（第 8.2 节），但仍需检查 Skill 定义中是否固化了过时的资源标识。
+
+**离职时的凭证处理**：
+
+当员工离职：
+
+1. **立即禁用所有授权连接**：标记所有 `DelegatedCredential` 为 `revoked`。
+2. **删除本地凭证**：从 Credential Store 中删除该员工的所有凭证记录。
+3. **第三方撤销**：
+   - 撤销所有 OAuth Token。
+   - 从所有 GitHub Team、Slack Workspace、Jira Project 中移除成员关系。
+   - 吊销 GitHub App 的 Installation Access Token（如由企业统一管理）。
+4. **记录审计事件**：记录所有凭证回收操作，包括成功、失败和重试状态。
+
+**重要工程事实**：
+
+- **不能仅删除内部数据库角色就声称第三方权限已撤销。** 需要根据第三方 API 能力同步变更、禁用凭证或执行撤销。
+- **对于无法即时撤销的外部授权**（如第三方 API 限流、不支持撤销），通过凭证禁用、Gateway 拒绝、持续重试和告警降低风险。
+- **Agent 运行实例重建后**，Credential Store 中已被禁用的凭证不会被重新加载，新的 Agent 实例只加载当前有效的凭证。
+
 ## 实现步骤
 
 ### 8.1 Tool Gateway 凭证获取流程

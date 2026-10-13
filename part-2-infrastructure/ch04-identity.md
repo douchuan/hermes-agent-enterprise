@@ -284,6 +284,72 @@ router.get("/tenant/:tenantId/sandbox", requireAuth, (req, res) => {
 
 即使前端隐藏了其他租户的入口，或者攻击者在 URL 中伪造 `tenantId`，服务端仍然拒绝越权访问。
 
+### 组织身份与角色
+
+OIDC 认证解决了"员工是谁"的问题，但没有解决"员工在组织中担任什么角色"的问题。
+
+在企业中，员工的权限不仅取决于租户，还取决于：
+
+- **部门**：研发部、市场部、财务部等。
+- **角色**：工程师、经理、管理员等。
+- **组织关系**：员工可能属于多个团队，或在不同团队间调动。
+
+Control Plane 需要从可信的 HR 系统或企业身份目录（如 Active Directory、Okta SCIM）获取员工的组织信息，并将其与 OIDC 身份关联。
+
+```typescript
+// 员工组织信息
+interface EmployeeOrgInfo {
+  employeeId: string;
+  department: string;       // "engineering", "marketing", "finance"
+  role: string;             // "engineer", "manager", "admin"
+  teams: string[];          // ["backend-team", "infra-team"]
+  managerId?: string;       // 审批人可能是直属经理
+}
+```
+
+**为什么部门信息很重要？**
+
+- Tool Gateway 的授权策略可以基于部门制定。例如，研发部员工可以使用 GitHub 工具，市场部员工可能不需要。
+- 当员工从研发部调到市场部时，平台需要根据新的部门重新计算权限（见本章后续章节和第 5、7、8 章）。
+
+### 员工与个人 Agent 的绑定
+
+每位员工通过企业平台登录后，Control Plane 为其分配一个**长期稳定的个人 Agent 身份**：
+
+```
+OIDC 身份 (issuer, subject)  →  InternalUser  →  AgentIdentity
+────────────────────────────────────────────────────────────────
+(iss=dex, sub=08a86...,      →  user-alice-001 →  agent-alice-001
+ email=alice, dept=engineering)
+```
+
+这个绑定关系在服务端维护。Agent 身份是稳定的——即使底层 Pod 重启、重建或暂停，Agent 的 `agentId`、Memory、Skills 和 Workspace 保持不变。
+
+**区分以下概念**：
+
+| 概念 | 说明 | 变化时机 |
+|------|------|----------|
+| 员工身份 (User Identity) | 由 OIDC (issuer, subject) 标识 | 员工更换 IdP 时 subject 可能变化 |
+| 个人 Agent 身份 (Agent Identity) | 平台分配给员工的 Agent 标识 | 员工离职、身份主体变化或安全事件 |
+| Agent 运行实例 (Runtime Instance) | 当前运行的 Pod / 进程 | Pod 重建、滚动更新、暂停恢复 |
+| Agent 持久化状态 (Persistent State) | Memory、Skills、Workspace、会话 | PVC 删除或数据清理 |
+
+**员工身份是 Agent 身份的归属主体。** 平台以员工为单位分配个人 Agent，员工通过主动授权委托 Agent 访问外部服务（第 7 章）。
+
+### 组织关系变化与权限重算
+
+员工的部门和角色可能发生变化——从研发部调到市场部，从工程师升职为经理，或离职。
+
+**核心原则：Agent 的身份与长期学习状态可以保持连续，但 Agent 的有效访问权限必须服从员工当前的组织身份、外部服务授权和企业安全策略。**
+
+这意味着：
+
+1. **普通部门变更**：保留原 Agent 身份，重新评估权限和数据边界。
+2. **转岗时**：旧部门的权限不应无条件保留，外部授权连接需要重新评估。
+3. **离职时**：Agent 身份可保留过渡期（数据保留策略），但所有活跃权限必须撤销。
+
+权限重算流程在第 5 章（Sandbox 生命周期）、第 7 章（外部授权撤销）、第 8 章（凭证回收）和第 10 章（审计记录）中详细展开。
+
 ## 本地开发：使用 Dex 模拟 OIDC 身份提供商
 
 ### 为什么选择 Dex
@@ -427,7 +493,10 @@ kubectl -n hermes-dev logs -l app=dex
 
 ### 未覆盖的（后续章节）
 
-- **Tool Gateway 授权**：本章演示了基本的租户级授权，但 Tool Gateway 还需要资源级授权（第 7 章）
+- **员工与个人 Agent 的长期绑定**：每位员工对应一个稳定的 Agent 身份，运行实例可重建但身份不变（第 5 章）
+- **外部服务委托授权**：员工主动委托 Agent 访问 GitHub 等第三方服务，OAuth 授权与运行时授权检查的区别（第 7 章）
+- **组织关系变化时的权限重算**：员工转岗、离职时的权限回收、凭证处理和授权撤销（第 5、7、8 章）
+- **Tool Gateway 资源级授权**：本章演示了基本的租户级授权，但 Tool Gateway 还需要资源级授权（第 7 章）
 - **会话撤销**：员工离职后如何撤销所有活跃 Session（第 12 章）
 - **Sandbox 生命周期**：员工入职/离职时的 Sandbox 创建和销毁（第 5 章）
 - **高风险操作审批**：审批流程绑定具体操作和目标（第 9 章）
@@ -449,8 +518,11 @@ kubectl -n hermes-dev logs -l app=dex
 2. **完整的 ID Token 验证**：签名、Issuer、Audience、Nonce、有效期由库自动验证。
 3. **安全的 Session 管理**：`HttpOnly`、`Secure`、`SameSite` Cookie，不将敏感凭证暴露给浏览器。
 4. **稳定的身份映射**：使用 `(issuer, subject)` 而非单独邮箱，避免身份冲突。
-5. **认证与授权分离**：OIDC 只负责身份验证，Control Plane 负责租户映射，Tool Gateway 负责资源级授权。
-6. **本地开发用 Dex**：无需 Google 账号，预置多租户测试用户，复用同一套应用代码。
+5. **组织身份与角色**：员工身份与部门、角色关联，为 Tool Gateway 授权策略提供依据。
+6. **员工与个人 Agent 绑定**：每位员工对应一个长期稳定的 Agent 身份，运行实例可重建但身份不变。
+7. **认证与授权分离**：OIDC 只负责身份验证，Control Plane 负责租户映射，Tool Gateway 负责资源级授权。
+8. **权限随组织关系重算**：员工转岗或离职时，Agent 身份可保留，但有效权限必须重新评估（详见第 5、7、8 章）。
+9. **本地开发用 Dex**：无需 Google 账号，预置多租户测试用户，复用同一套应用代码。
 
 ## 参考资料
 

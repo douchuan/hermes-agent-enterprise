@@ -1,7 +1,7 @@
 // 内部用户与租户映射
 //
 // 生产环境：从数据库加载
-// 本地开发：静态映射，用于演示跨租户隔离
+// 本地开发：静态映射，用于演示跨租户隔离、员工-Agent 绑定和转岗流程
 
 export interface InternalUser {
   // 由 (issuer, subject) 稳定标识
@@ -12,6 +12,24 @@ export interface InternalUser {
   name: string;
   // 用户所属的租户列表
   tenantIds: string[];
+  // 部门与角色（用于 Tool Gateway 授权策略）
+  department: string;
+  role: string;
+  // 绑定的个人 Agent 身份
+  agentId: string;
+}
+
+// 外部授权连接（模拟 OAuth 委托授权）
+export interface ExternalAuthConnection {
+  id: string;
+  employeeId: string;
+  provider: "github" | "jira" | "slack";
+  mode: "oauth_delegated" | "enterprise_app";
+  scopes: string[];
+  status: "active" | "expired" | "revoked" | "disabled";
+  createdAt: string;
+  // 部门绑定（用于转岗时评估）
+  departmentAtCreation: string;
 }
 
 // 本地开发用静态用户映射
@@ -26,6 +44,9 @@ export const devUsers: Map<string, InternalUser> = new Map([
       email: "alice@example.com",
       name: "Alice",
       tenantIds: ["tenant-acme-001"],
+      department: "engineering",
+      role: "engineer",
+      agentId: "agent-alice-001",
     },
   ],
   [
@@ -37,6 +58,9 @@ export const devUsers: Map<string, InternalUser> = new Map([
       email: "bob@example.com",
       name: "Bob",
       tenantIds: ["tenant-acme-001"],
+      department: "engineering",
+      role: "engineer",
+      agentId: "agent-bob-001",
     },
   ],
   [
@@ -48,6 +72,26 @@ export const devUsers: Map<string, InternalUser> = new Map([
       email: "carol@otherorg.com",
       name: "Carol",
       tenantIds: ["tenant-other-002"],
+      department: "finance",
+      role: "analyst",
+      agentId: "agent-carol-001",
+    },
+  ],
+]);
+
+// 模拟外部授权连接（本地开发用）
+export const devAuthConnections: Map<string, ExternalAuthConnection> = new Map([
+  [
+    "gh-alice-001",
+    {
+      id: "gh-alice-001",
+      employeeId: "user-alice-001",
+      provider: "github",
+      mode: "oauth_delegated",
+      scopes: ["repo", "read:org"],
+      status: "active",
+      createdAt: "2025-01-01T00:00:00Z",
+      departmentAtCreation: "engineering",
     },
   ],
 ]);
@@ -87,4 +131,118 @@ export function resolveUser(
 // 验证用户是否有权限访问指定租户的资源
 export function hasTenantAccess(user: InternalUser, tenantId: string): boolean {
   return user.tenantIds.includes(tenantId);
+}
+
+// 根据员工 ID 查找用户
+export function findById(userId: string): InternalUser | null {
+  for (const user of devUsers.values()) {
+    if (user.id === userId) return user;
+  }
+  return null;
+}
+
+// 根据 Agent ID 查找对应的员工
+export function findByAgentId(agentId: string): InternalUser | null {
+  for (const user of devUsers.values()) {
+    if (user.agentId === agentId) return user;
+  }
+  return null;
+}
+
+// 模拟转岗：更新部门并重新计算权限
+// 返回变更详情，用于审计记录
+export function transferDepartment(
+  userId: string,
+  newDepartment: string
+): {
+  user: InternalUser;
+  oldDepartment: string;
+  newDepartment: string;
+  revokedConnections: string[];
+  auditEvents: Array<{ eventType: string; details: Record<string, unknown> }>;
+} | null {
+  const user = findById(userId);
+  if (!user) return null;
+
+  const oldDepartment = user.department;
+  const auditEvents: Array<{ eventType: string; details: Record<string, unknown> }> = [];
+
+  // 1. 更新部门
+  user.department = newDepartment;
+
+  // 记录组织变更事件
+  auditEvents.push({
+    eventType: "ORGANIZATION_CHANGED",
+    details: {
+      employeeId: userId,
+      agentId: user.agentId,
+      oldDepartment,
+      newDepartment,
+      initiatedBy: "admin",
+      timestamp: new Date().toISOString(),
+    },
+  });
+
+  // 2. 重新计算权限（模拟）
+  // 研发部 → 非研发部：撤销研发部专属的外部授权
+  const revokedConnections: string[] = [];
+  if (oldDepartment === "engineering" && newDepartment !== "engineering") {
+    // 检查是否有部门绑定的外部授权连接需要撤销
+    for (const [connId, conn] of devAuthConnections.entries()) {
+      if (conn.employeeId === userId && conn.departmentAtCreation === "engineering") {
+        conn.status = "disabled";
+        revokedConnections.push(connId);
+        auditEvents.push({
+          eventType: "EXTERNAL_AUTH_DISABLED",
+          details: {
+            employeeId: userId,
+            agentId: user.agentId,
+            externalAuthConnectionId: connId,
+            externalAuthProvider: conn.provider,
+            reason: `department_change: ${oldDepartment} → ${newDepartment}`,
+            initiatedBy: "control-plane",
+            timestamp: new Date().toISOString(),
+          },
+        });
+      }
+    }
+  }
+
+  // 3. 记录权限重算事件
+  auditEvents.push({
+    eventType: "PERMISSION_RECALCULATED",
+    details: {
+      employeeId: userId,
+      agentId: user.agentId,
+      oldDepartment,
+      newDepartment,
+      revokedConnections,
+      initiatedBy: "control-plane",
+      timestamp: new Date().toISOString(),
+    },
+  });
+
+  return { user, oldDepartment, newDepartment, revokedConnections, auditEvents };
+}
+
+// 检查用户是否有权限执行某个工具操作（模拟 Tool Gateway 策略）
+export function canExecuteToolAction(
+  user: InternalUser,
+  toolName: string,
+  action: string
+): { allowed: boolean; reason: string } {
+  // 研发部可以使用 GitHub 工具
+  if (toolName === "github") {
+    if (user.department !== "engineering") {
+      return { allowed: false, reason: `Department ${user.department} does not have access to ${toolName}` };
+    }
+  }
+
+  // 高风险操作需要审批（模拟）
+  const highRiskActions = new Set(["delete_repo", "force_push", "modify_branch_protection"]);
+  if (highRiskActions.has(action)) {
+    return { allowed: false, reason: `Action ${action} requires approval` };
+  }
+
+  return { allowed: true, reason: "allowed" };
 }

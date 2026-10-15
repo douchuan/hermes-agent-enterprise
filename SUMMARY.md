@@ -31,6 +31,8 @@
   * [第 13 章：从零搭建一个企业级 Hermes Agent 平台](part-5-implementation/ch13-end-to-end.md)
   * [第 14 章：安全验收与生产部署检查清单](part-5-implementation/ch14-security-checklist.md)
 
+* [后记](postscript/README.md)
+
 * 附录
   * [术语表](appendix/glossary.md)
   * [参考资料](appendix/references.md)

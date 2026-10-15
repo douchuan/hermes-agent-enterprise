@@ -37,6 +37,7 @@ Hermes Agent 的记忆管理与 Skill 机制，让 AI 不仅有机会帮助员�
 | `part-3-governance/` | 工具访问、凭证管理与审批 |
 | `part-4-security-operations/` | 可观测性、安全治理与平台生命周期 |
 | `part-5-implementation/` | 端到端实现与安全验收 |
+| `postscript/` | 后记 |
 | `appendix/` | 术语表与参考资料 |
 | `assets/diagrams/` | 书籍插图与架构图 |
 | `examples/` | 配套代码、实验与配置示例 |
